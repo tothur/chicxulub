@@ -26,3 +26,8 @@ OpenStreetMap cenotes, the cached GPlates reconstructions and the PALEOMAP plate
 
 PALEOMAP PaleoDEM and plate model (Scotese & Wright 2018, CC BY 4.0), Copernicus GLO-90, GMRT, OpenStreetMap
 contributors (ODbL), HadCM3L run texpn1 (Valdes et al. 2021), NASA SVS Deep Star Maps 2020, Yale Bright Star Catalogue.
+
+## License
+
+The code is under the MIT License (see `LICENSE`). Data derived from the sources above keeps their terms
+(PALEOMAP CC BY 4.0, OpenStreetMap ODbL, and so on).
