@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.DS_Store
+# raw inputs are re-downloaded (see pipeline/README.md); the small, hard-to-recreate ones are kept
+raw/*
+!raw/osm_sinkholes.json
+!raw/gws/
+!raw/paleomap_model/

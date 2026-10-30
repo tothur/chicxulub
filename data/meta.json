@@ -1,0 +1,31 @@
+{
+ "proj": {
+  "type": "aeqd",
+  "lat0": 21.4,
+  "lon0": -89.55,
+  "ellps": "WGS84"
+ },
+ "extent_km": [
+  -420.0,
+  380.0,
+  -360.0,
+  380.0
+ ],
+ "res_km": 0.4,
+ "size": [
+  2000,
+  1850
+ ],
+ "encode": {
+  "offset_m": -4871.0,
+  "step_m": 0.1
+ },
+ "range_m": [
+  -4870.20654296875,
+  355.6089172363281
+ ],
+ "sources": [
+  "Copernicus GLO-90 DEM (land)",
+  "GMRT v4 (Ryan et al. 2009), seafloor"
+ ]
+}
