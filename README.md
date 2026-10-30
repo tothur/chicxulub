@@ -2,6 +2,8 @@
 
 Interactive reconstructions of the Chicxulub impact, 66 million years ago, in the browser (three.js, no build step).
 
+**Live:** [3D viewer](https://tothur.github.io/chicxulub/sim/) · [2D map of today's crater](https://tothur.github.io/chicxulub/)
+
 - **`sim/`**: the 3D viewer. One zoomable scene from the crater out to the whole Earth as it was then: the target rocks,
   the crater forming, the sea's return and tsunami, ejecta re-entry, air blast, seismic waves, wildfires driven by the
   prevailing winds, the impact winter and the long warm-up, plus fossil sites and K–Pg boundary sections at their
