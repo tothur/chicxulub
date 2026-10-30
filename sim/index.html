@@ -3132,14 +3132,14 @@ function setGlobeMode(on) {
   if (on) { const h = $('modeHint'); h.textContent = 'Click anywhere on the globe to see what reached it, and when · double-click to fly back to the crater'; h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
 }
 function globeView() { const k = far(); return [EC.clone().add(toV(-60, 14).applyMatrix4(GM_ROT).multiplyScalar(RE_M * 3.4 * k)), EC.clone()]; }   // the Atlantic hemisphere
-async function enterGlobe(instant, centre) {          // centre [lon, lat]: look down on it, north up
+async function enterGlobe(instant, centre) {          // centre [lon, lat]: look down on it (else the Atlantic hemisphere); north up
   closePops(); tour = null; if (camMode !== 'orbit') setMode('orbit', true);
   if (!globeReady) { $('loadMsg').textContent = 'Loading the globe'; $('loadBar').style.width = '60%'; $('loading').classList.remove('done'); }
   try { await ensureGlobe(); } catch (err) { $('loadMsg').textContent = 'Could not load the globe. Reload the page to try again.'; throw err; }
   $('loading').classList.add('done');
   const [p, t] = centre ? [EC.clone().add(toV(centre[0], centre[1]).applyMatrix4(GM_ROT).multiplyScalar(RE_M * 3.4 * far())), EC.clone()] : globeView();
-  const up = centre ? toV(0, 90).applyMatrix4(GM_ROT) : null;
-  if (instant) { fly = null; camera.position.copy(p); controls.target.copy(t); if (up) camera.up.copy(up); controls.update(); } else flyTo(p, t, 2.8, up);
+  const up = toV(0, 90).applyMatrix4(GM_ROT);         // north up, however the view was rolled before
+  if (instant) { fly = null; camera.position.copy(p); controls.target.copy(t); camera.up.copy(up); camera.lookAt(t); controls.update(); } else flyTo(p, t, 2.8, up);
 }
 function leaveGlobe() { VIEWS.overview(); }
 $('globeBtn').addEventListener('click', () => globeMode ? leaveGlobe() : enterGlobe());
