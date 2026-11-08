@@ -59,6 +59,23 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .more[aria-expanded="true"] svg { transform: rotate(180deg); }
 #stageText { margin: 9px 0 2px; max-width: 44ch; max-height: 38vh; overflow: auto; font-size: 14px; line-height: 1.55; color: var(--ink-2); text-wrap: pretty; }
 
+.guide-start { margin-left: 14px; }
+.guide-start svg { fill: var(--ember); stroke: none; }
+.guide { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 4; width: min(620px, calc(100% - 24px)); padding: 13px 16px 10px; border-radius: 16px; background: var(--glass-hi); }
+.g-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.guide h2 { margin: 0; font: 500 19px/1.2 var(--f-display); letter-spacing: 0; text-transform: none; color: var(--ink); }
+#gStep { font: 400 11.5px var(--f-data); color: var(--ink-3); white-space: nowrap; }
+#gText { margin: 5px 0 8px; font-size: 14px; line-height: 1.45; color: var(--ink-2); text-wrap: pretty; }
+.g-foot { display: flex; align-items: center; gap: 2px; }
+.g-bar { flex: 1; height: 3px; margin-right: 10px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.g-bar i { display: block; height: 100%; width: 0; background: var(--ember); }
+.g-foot button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 50%; background: none; color: var(--ink-2); }
+.g-foot button:hover { background: var(--hover); color: var(--ink); }
+.g-foot svg { width: 16px; height: 16px; fill: currentColor; }
+body.guide-on .dock, body.guide-on .credit, body.guide-on .legend, body.guide-on .coords, body.guide-on .toast, body.guide-on #more, body.guide-on #guideBtn, body.guide-on #stageText { display: none !important; }
+@media (max-width: 1300px) { body.guide-on .climate { display: none !important; } }
+@media (max-width: 640px) { .guide-start { display: flex; margin: 6px 0 0; } body.guide-on .strata { top: 38%; } }
+
 /* ---- time column ---- */
 .strata {
   position: fixed; right: 16px; top: 50%; transform: translateY(-50%);
@@ -318,6 +335,7 @@ body:not(.long-mode) .climate { display: none !important; }
   <h1 id="stageName"></h1>
   <p class="when"><span id="time"></span><span id="clock"></span></p>
   <button class="more" id="more" type="button" aria-expanded="false" aria-controls="stageText"><span>About this moment</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5"/></svg></button>
+  <button class="more guide-start" id="guideBtn" type="button"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.8 10 6l-7 4.2z"/></svg><span>Guided tour · 4 min</span></button>
   <p id="stageText" hidden></p>
 </header>
 
@@ -355,6 +373,7 @@ body:not(.long-mode) .climate { display: none !important; }
 
 <div class="pop" id="placesPop" hidden>
   <h2>Watch</h2>
+  <button class="item hot" type="button" id="watchAll">The whole story, guided (4 min)</button>
   <button class="item hot" type="button" id="watchImpact">The impact, from the side</button>
   <button class="item hot" type="button" id="watchSea">The sea's return</button>
   <button class="item hot" type="button" id="coastTour">A flight along the flooded north coast</button>
@@ -414,6 +433,17 @@ body:not(.long-mode) .climate { display: none !important; }
   <p class="note" id="clNote"></p>
 </aside>
 <aside class="probe glass" id="probe" hidden aria-live="polite"><div class="head"><h2>What reached this place</h2><button class="x" id="probeX" type="button" aria-label="Close">×</button></div><div id="probeBody"></div></aside>
+<section class="guide glass" id="guide" hidden aria-label="Guided tour">
+  <div class="g-head"><h2 id="gTitle"></h2><span id="gStep"></span></div>
+  <p id="gText" aria-live="polite"></p>
+  <div class="g-foot">
+    <div class="g-bar"><i id="gBar"></i></div>
+    <button id="gPrev" type="button" aria-label="Previous scene" title="Previous scene ([)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15 4v12L6 10zM4 4h2v12H4z"/></svg></button>
+    <button id="gPlay" type="button" aria-label="Pause" title="Pause (P)"><svg viewBox="0 0 20 20" aria-hidden="true" id="gPlayIcon"><path d="M4 3h4v14H4zM12 3h4v14h-4z"/></svg></button>
+    <button id="gNext" type="button" aria-label="Next scene" title="Next scene (])"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12l9-6zM14 4h2v12h-2z"/></svg></button>
+    <button id="gClose" type="button" aria-label="End the tour" title="End the tour (Esc)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+  </div>
+</section>
 <p class="toast glass" id="modeHint" role="status"></p>
 <p class="coords" id="camInfo" aria-live="off"></p>
 <p class="credit"><span class="ctext">After Gulick et al. 2008, 2019; Collins et al. 2008, 2020; Morgan et al. 2016; Range et al. 2022; Collins et al. 2005; Senel et al. 2023 and others. 66 Ma Earth: PALEOMAP (Scotese &amp; Wright 2018), GPlates. </span><button type="button" id="aboutLink">Sources and method</button></p>
@@ -2054,9 +2084,10 @@ function setPlaying(v) {
   $('play').setAttribute('aria-label', tr(v ? 'Pause' : 'Play')); $('play').title = tr(v ? 'Pause (P)' : 'Play (P)');
   $('playIcon').innerHTML = v ? '<path d="M4 3h4v14H4zM12 3h4v14h-4z"/>' : '<path d="M5 3l12 7-12 7z"/>';
 }
-const togglePlay = () => { tour = null; if (!playing && P >= 0.999) setP(0); setPlaying(!playing); };
+const togglePlay = () => { if (guide) { pauseGuide(!guide.paused); return; } tour = null; if (!playing && P >= 0.999) setP(0); setPlaying(!playing); };
 $('play').addEventListener('click', togglePlay);
 function goTo(p) {
+  if (guide) stopGuide();
   tour = null;
   setPlaying(false);
   const dur = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 0.5 + 1.6 * Math.abs(p - P);
@@ -2070,6 +2101,7 @@ function stepGo(dt) {
   if (k >= 1) goAnim = null;
 }
 function chapter(dir) {
+  if (guide) { guide.moved = true; showScene(guide.i + dir); return; }
   const ref = goAnim ? goAnim.p1 : P;
   const next = dir > 0 ? BANDS.find(b => b.anchor > ref + 1e-3) : [...BANDS].reverse().find(b => b.anchor < ref - 1e-3);
   if (next) goTo(next.anchor);
@@ -3246,12 +3278,101 @@ function adaptResolution(dt) {
   else if (fastT > 4 && pr < PR_MAX) { next = Math.min(PR_MAX, pr + 0.25); fastT = 0; }
   if (next !== pr) { pr = next; renderer.setPixelRatio(pr); composer.setPixelRatio(pr); resize(); }
 }
+// ---------- the guided tour: the whole event in a few minutes, and only when asked for ----------
+const earthShot = (lon, lat) => () => enterGlobe(false, [lon, lat]);
+const viewShot = v => () => showView(v);
+const GUIDE = [
+  { title: 'The Earth, 66 million years ago', text: 'The last day of the Cretaceous. The Atlantic is still narrow, India is an island, and forests reach poles that have no ice sheets.', shot: earthShot(-75, 25), cut: 'off', t0: -10800, t1: -9000, dur: 11 },
+  { title: 'The target', text: 'A warm, shallow sea over the Yucatán shelf, on top of 3–4 km of limestone, dolomite and anhydrite. It is spring in the north. Above this view, an asteroid about 12 km across is closing in at 20 km every second.', shot: viewShot('start'), cut: 'off', t0: -9000, t1: -300, dur: 11 },
+  { title: 'The last seconds', text: 'The asteroid is wider than the atmosphere is deep, and crosses all of it in about six seconds. This cut-away shows the rock layers under the sea.', shot: viewShot('watch'), cut: 'ns', t0: -15, t1: -0.01, dur: 13 },
+  { title: 'A hole 30 km deep', text: 'The impact releases around 100 million megatons of TNT. Within a minute it opens a cavity about 100 km wide and 30 km deep, cutting through all the sediment into the crust, and throws out a curtain of debris.', cut: 'ns', t0: 0, t1: 60, dur: 15 },
+  { title: 'The crater forms', text: 'The floor rebounds into a mountain more than 10 km high, taller than Everest, then collapses outward within minutes. Granite from 10 km down comes to rest as the peak ring, and the crater widens to 180–200 km.', shot: viewShot('crater'), cut: 'ns', t0: 60, t1: 600, dur: 16 },
+  { title: 'Around the world', text: 'Seismic waves race around the planet and the air blast follows. Debris thrown above the atmosphere falls back all over the Earth, heating the upper air for an hour or more.', shot: earthShot(-71, 25.5), cut: 'off', t0: 600, t1: 5400, dur: 16 },
+  { title: 'Back at the crater', text: 'The clock goes back to the first hour. The ocean pours into the crater from the deep north-north-east and flashes to steam on the hot melt.', shot: viewShot('flood'), cut: 'ns', t0: 900, t1: 3000, dur: 14 },
+  { title: 'The tsunami', text: 'Waves more than 100 m high cross the deep Gulf as fast as an airliner, break on the shelves and flood the low coasts tens of kilometres inland.', shot: viewShot('gulf'), cut: 'off', t0: 3000, t1: 12000, dur: 15 },
+  { title: 'The first two days', text: 'The tsunami runs through the open seaway into the Pacific and around Africa, and reaches nearly every ocean. On land, fires lit by the falling debris burn on; how far they spread is debated.', shot: earthShot(-60, 10), cut: 'off', t0: 12000, t1: 172800, dur: 14 },
+  { title: 'Darkness', text: 'Dust, sulfur and perhaps soot spread through the upper atmosphere. Within weeks the sunlight at the ground is too weak for photosynthesis, and the land starts to cool.', cut: 'off', t0: 172800, t1: 60 * 86400, dur: 12 },
+  { title: 'Impact winter', text: 'Plankton and plants stop growing, and the food chains built on them collapse. How cold it got, and for how long, depends on what darkened the sky; the published scenarios disagree.', cut: 'off', t0: 60 * 86400, t1: 2 * YEAR, dur: 13 },
+  { title: 'The long cold', text: 'The haze clears within a few years, but the chilled ocean keeps the world cold for decades.', cut: 'off', t0: 2 * YEAR, t1: 30 * YEAR, dur: 11 },
+  { title: 'A warmer world', text: 'Then the climate overshoots: fish teeth in Tunisia record about 5 °C of warming that lasted some 100,000 years. By then about three-quarters of all species have gone.', cut: 'off', t0: 30 * YEAR, t1: 1e5 * YEAR, dur: 13 },
+  { title: 'How we know', text: 'All of this was pieced together from the rocks, above all a thin clay rich in iridium found around the world. Each marker is a place where the record can be read; after the tour, click one to see what it shows.', shot: earthShot(-38, 34), cut: 'off', sites: true, t0: 1e5 * YEAR, t1: 1e5 * YEAR, dur: 11 },
+];
+let guide = null;
+const showGuidePlayIcon = paused => {
+  $('gPlayIcon').innerHTML = paused ? '<path d="M5 3l12 7-12 7z"/>' : '<path d="M4 3h4v14H4zM12 3h4v14h-4z"/>';
+  $('gPlay').setAttribute('aria-label', tr(paused ? 'Play' : 'Pause')); $('gPlay').title = tr(paused ? 'Play (P)' : 'Pause (P)');
+};
+function guideLabels() { const g = guide; $('gStep').textContent = (g.paused ? tr('Paused') + ' · ' : '') + `${g.i + 1} / ${GUIDE.length}`; }
+function runShot() {                                  // send the camera to the scene's place
+  const g = guide, s = GUIDE[g.i];
+  if (s.cut !== cutMode) setCut(s.cut);
+  document.body.classList.toggle('show-sites', !!s.sites || $('tSites').getAttribute('aria-pressed') === 'true');
+  g.t = 0; g.stage = 'wait';
+  if (s.shot || g.moved) { g.stage = 'fly'; (s.shot || GUIDE.slice(0, g.i).reverse().find(x => x.shot).shot)(); }       // a scene without a shot stays where the last one went
+  g.moved = false;
+}
+function showScene(i) {
+  const g = guide; if (i >= GUIDE.length) { stopGuide(true); return; }
+  g.i = Math.max(0, i); g.k = 0; g.h = 0; g.paused = false; showGuidePlayIcon(false);
+  const s = GUIDE[g.i]; setP(pOfT(s.t0));
+  $('gTitle').textContent = tr(s.title); $('gText').textContent = tr(s.text); guideLabels();
+  runShot();
+}
+function startGuide() {
+  if (guide) return;
+  setPlaying(false); goAnim = null; seaTour = false; tour = null; closePops(); showAbout(false); toggleHelp(false);
+  if (!$('probe').hidden) $('probeX').click();
+  guide = { i: 0, k: 0, h: 0, t: 0, stage: 'fly', paused: false, moved: false, cut: cutMode };
+  document.body.classList.add('guide-on'); $('guide').hidden = false;
+  for (const n of NEEDS) n[1]();                                            // start fetching everything now, so that scenes rarely wait
+  showScene(0);
+}
+function stopGuide(finished) {
+  if (!guide) return;
+  const cut = guide.cut; guide = null; fly = null;
+  document.body.classList.remove('guide-on'); $('guide').hidden = true;
+  document.body.classList.toggle('show-sites', $('tSites').getAttribute('aria-pressed') === 'true');
+  if (cut !== cutMode) setCut(cut);
+  if (finished) { const h = $('modeHint'); h.textContent = tr('End of the tour: drag the time column, click a marker, or explore on your own'); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 7000); }
+}
+function pauseGuide(on) {
+  const g = guide; g.paused = on; showGuidePlayIcon(on); guideLabels();
+  if (!on && g.moved) { if (!$('probe').hidden) $('probeX').click(); runShot(); }     // the viewer looked around: go back to the scene's view
+}
+function guideTouched() { if (guide) { guide.moved = true; if (!guide.paused) pauseGuide(true); } }     // navigating by hand pauses the tour
+function stepGuide(dt) {
+  const g = guide, s = GUIDE[g.i];
+  $('gBar').style.width = (g.i + g.k) / GUIDE.length * 100 + '%';
+  if (g.paused) return;
+  g.t += dt;
+  if (g.stage === 'fly') { if (fly && matchMedia('(prefers-reduced-motion: reduce)').matches) fly.t = 0.999; if (g.t < 0.2 || fly) return; g.stage = 'wait'; g.t = 0; }
+  if (g.stage === 'wait') {                            // hold until the data this scene shows has arrived (the first visit may still be fetching it)
+    const missing = NEEDS.filter(([t0, , ready]) => s.t1 >= t0 && !ready());
+    if (missing.length && g.t < 25) { for (const [, fn] of missing) fn(); $('gStep').textContent = tr('Loading…'); return; }
+    guideLabels(); g.stage = 'play';
+  }
+  if (g.k < 1) { g.k = Math.min(1, g.k + dt / s.dur); setP(mix(pOfT(s.t0), pOfT(s.t1), g.k)); return; }
+  if ((g.h += dt) >= 1.2) showScene(g.i + 1);
+}
+for (const id of ['guideBtn', 'watchAll']) $(id).addEventListener('click', startGuide);
+$('gPlay').addEventListener('click', () => pauseGuide(!guide.paused));
+$('gPrev').addEventListener('click', () => chapter(-1));
+$('gNext').addEventListener('click', () => chapter(1));
+$('gClose').addEventListener('click', () => stopGuide());
+colEl.addEventListener('pointerdown', () => stopGuide(), true);
+for (const ev of ['pointerdown', 'wheel']) renderer.domElement.addEventListener(ev, guideTouched, { capture: true, passive: true });
+const GUIDE_NAV = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'KeyR', 'KeyF', 'KeyZ', 'KeyX', 'Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'KeyN', 'KeyG', 'Digit1', 'Digit2']);
+addEventListener('keydown', e => {
+  if (!guide || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === 'Escape') stopGuide(); else if (GUIDE_NAV.has(e.code)) guideTouched();
+});
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
   adaptResolution(dt);
   U.uTime.value = now / 1000;
   if (goAnim) stepGo(dt);
   if (tour) stepTour(dt);
+  if (guide) stepGuide(dt);
   const SPEED = { before: 0.02, approach: 0.006, contact: 0.006, excavation: 0.007, uplift: 0.007, collapse: 0.009, crater: 0.03, resurge: 0.006, tsunami: 0.005, dayone: 0.02, weeks: 0.008, months: 0.007, years: 0.006, aftermath: 0.008 };
   const slow = S.phase === 'approach' && S.imp.t > -8 ? 0.22 : 1;        // the last seconds through the air, in slow motion
   if (playing) { setP(P + dt * (SPEED[S.phase] || 0.017) * slow); if (P >= 1) setPlaying(false); }
@@ -3281,5 +3402,5 @@ apply(P); updateModeHint();
 requestAnimationFrame(frame);
 S0.set(0, 0, -60e3); enterGlobe(true).catch(() => $('loading').classList.add('done'));      // open on the globe; the loading screen stays up until it is ready
 setTimeout(() => { loadSky().then(() => loadTopo()).then(() => loadSWE()).then(() => loadCoast()).then(() => ensureFrames()).then(() => ensureClimate()).catch(() => {}); }, 1500);   // stream the rest after the first view      // the globe data also drive the sky glow, haze and frost in this view
-if (location.search.includes('debug')) window.__dbg = { scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact };
+if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact };
 </script>

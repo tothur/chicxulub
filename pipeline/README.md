@@ -343,3 +343,8 @@ v36 (2026-11-08): Hungarian.
 - sim/hu.js maps the viewer's English text to Hungarian (long texts by their first 60 characters); site records and names
   are in it too, so sites.py and meta.json stay English. Values in generated text go through tr() with named placeholders;
   the {x|val} and {x|ig} filters add Hungarian case endings to times. The 2D map keeps its smaller dictionary inline.
+
+v37 (2026-11-08): guided tour.
+- A captioned run through the whole event in about 3.5 minutes, started only by the Guided tour button or Views > Watch
+  (GUIDE in sim/index.html: each scene has a camera shot, a time span and a caption). Navigating by hand pauses it; Play
+  returns to the scene's view. One scene steps back in time, to the first hour at the crater, and its caption says so.
