@@ -59,6 +59,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .story { margin: 12px 0 0; font: 400 15px/1.45 var(--f-display); color: var(--ink); }
 .story em { color: var(--ink-2); }
 .toggle-card { display: none; }
+.lang { display: inline-flex; margin: 8px 14px 0 0; padding: 0; border: 0; background: none; font-size: 12px; font-weight: 500; color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.lang:hover { color: var(--ink); }
 h2 { margin: 0 0 6px; font-size: 10.5px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
 
 .layers { display: grid; gap: 2px; margin: 0 -8px; }
@@ -132,6 +134,7 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 
     <p class="place">Yucatán Peninsula · Gulf of Mexico</p>
     <h1>Chicxulub</h1>
     <p class="when"><span><b>66.04 Ma</b> · K–Pg boundary</span><span>crater 180–200 km</span></p>
+    <button class="lang" id="langBtn" type="button" lang="hu">Magyar</button>
     <button class="toggle-card" id="toggleCard" aria-expanded="true">Hide details</button>
   </header>
   <div class="body">
@@ -163,6 +166,56 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 
 <div class="scale glass"><span id="scaleTxt">100 km</span><i id="scaleBar" style="width:80px"></i></div>
 
 <script>
+// Language: English is in the page and the code; HU maps the English text to Hungarian
+const LANG = (() => { const q = new URLSearchParams(location.search).get('lang'); if (q) return q === 'hu' ? 'hu' : 'en'; try { return localStorage.getItem('chicxulub.lang') === 'hu' ? 'hu' : 'en'; } catch (_) { return 'en'; } })();
+const HU = LANG !== 'hu' ? null : {
+  'Chicxulub Regional Map': 'Chicxulub – regionális térkép',
+  'Shaded relief map of the Yucatán Peninsula and the buried Chicxulub crater. Drag to pan, scroll or pinch to zoom.': 'A Yucatán-félsziget és az eltemetett Chicxulub-kráter árnyékolt domborzati térképe. Húzással mozgathatod, görgetéssel vagy csíptetéssel nagyíthatod.',
+  'Loading elevation grid…': 'A magassági rács betöltése…',
+  'Yucatán Peninsula · Gulf of Mexico': 'Yucatán-félsziget · Mexikói-öböl',
+  '66.04 Ma': '66,04 millió éve',
+  '· K–Pg boundary': '· K–Pg határ',
+  'crater 180–200 km': 'kráter: 180–200 km',
+  'Hide details': 'Részletek elrejtése',
+  'Show details': 'Részletek megjelenítése',
+  'An asteroid about 10–15 km wide struck a shallow carbonate shelf here and ended the Cretaceous. The crater now lies under roughly a kilometre of younger limestone.': 'Itt csapódott egy sekély karbonátselfbe egy 10–15 km átmérőjű kisbolygó, és ezzel véget vetett a krétának. A kráter ma nagyjából egy kilométernyi fiatalabb mészkő alatt fekszik.',
+  'At the surface, only a ring of cenotes and a trough a few metres deep trace its rim.': 'A felszínen csak egy cenotegyűrű és egy néhány méter mély árok rajzolja ki a peremét.',
+  'Layers': 'Rétegek',
+  'Land relief exaggeration': 'A szárazföldi domborzat torzítása',
+  'The plain rises only about 1 m per 3 km. Exaggerate it to see the trough along the buried rim and the Ticul fault ridge. Seafloor is drawn at ×3.': 'A síkság 3 km-enként mindössze mintegy 1 m-t emelkedik. Növeld a torzítást, hogy látszódjon az eltemetett perem menti árok és a Ticul-vetés gerince. A tengerfenék ×3 torzítással látható.',
+  'Elevation: Copernicus GLO-90 DEM (land),': 'Magasság: Copernicus GLO-90 DEM (szárazföld),',
+  '(seafloor). Cenotes: © OpenStreetMap contributors (ODbL). Crater geometry: Hildebrand et al. 1995; Morgan et al. 2016; Gulick et al. 2013. Trajectory: Collins et al. 2020. Azimuthal equidistant projection on the crater centre, so every distance from the centre is true.': '(tengerfenék). Cenoték: © az OpenStreetMap közreműködői (ODbL). A kráter geometriája: Hildebrand et al. 1995; Morgan et al. 2016; Gulick et al. 2013. Pálya: Collins et al. 2020. Kráterközéppontú azimutális távolságtartó vetület, így a középponttól mért minden távolság valódi.',
+  'Zoom in': 'Nagyítás', 'Zoom out': 'Kicsinyítés', 'Reset view': 'Nézet alaphelyzetbe',
+  'Move over the map for coordinates': 'Vidd a kurzort a térkép fölé a koordinátákhoz',
+  'Crater rim': 'Kráterperem',
+  'Final crater, 180–200 km across (gravity, seismic). Buried ~1 km down.': 'A végleges kráter, 180–200 km átmérővel (gravitációs és szeizmikus adatok). ~1 km mélyen eltemetve.',
+  'Peak ring': 'Csúcsgyűrű',
+  'Ring of uplifted granite ≈ 80–90 km across, drilled by Expedition 364.': 'Kiemelt gránitból álló, ≈ 80–90 km átmérőjű gyűrű, amelyet a 364. expedíció fúrt meg.',
+  'Ring of cenotes': 'Cenotegyűrű',
+  'Mapped cenotes': 'Térképezett cenoték',
+  'Impact trajectory': 'A becsapódás pályája',
+  'Steep, 45–60°, from the northeast (Collins et al. 2020).': 'Meredek, 45–60°, északkelet felől (Collins et al. 2020).',
+  'Boreholes': 'Fúrások',
+  'Continuous cores into the impactites. Select one for details.': 'Folyamatos magminták az impaktitokból. A részletekért válassz egyet.',
+  'Places and grid': 'Helyek és fokhálózat',
+  'Towns, seas and 1° graticule.': 'Települések, tengerek és 1°-os fokhálózat.',
+  'Gulf of Mexico': 'Mexikói-öböl', 'Campeche Bank': 'Campeche-pad', 'Bay of Campeche': 'Campeche-öböl', 'Caribbean Sea': 'Karib-tenger', 'Yucatán Channel': 'Yucatán-csatorna', 'Campeche Escarpment': 'Campeche-peremlejtő',
+  'CRATER RIM  180–200 km': 'KRÁTERPEREM  180–200 km', 'PEAK RING': 'CSÚCSGYŰRŰ', 'RING OF CENOTES': 'CENOTEGYŰRŰ',
+  'impactor, 45–60° from NE': 'becsapódó test, 45–60° ÉK felől',
+  'inside the peak ring': 'a csúcsgyűrűn belül', 'on the peak ring': 'a csúcsgyűrűn', 'in the crater': 'a kráterben', 'on the crater rim': 'a kráterperemen', 'outside the crater': 'a kráteren kívül',
+  'IODP–ICDP Expedition 364 (2016). Cored the peak ring from 505.7 to 1334.7 m below the seafloor; shocked granite from the deep crust sits under impact breccia and melt.': 'Az IODP–ICDP 364. expedíciója (2016). A csúcsgyűrűből a tengerfenék alatt 505,7 és 1334,7 m között vett magmintát; a mélykéregből származó, sokkolt gránit becsapódási breccsa és olvadék alatt helyezkedik el.',
+  'ICDP borehole (2001–02), 1511 m deep, between the peak ring and the crater rim. About 100 m of impactites under ~800 m of post-impact limestone.': 'ICDP-fúrás (2001–02), 1511 m mély, a csúcsgyűrű és a kráterperem között. Mintegy 100 m impaktit ~800 m becsapódás utáni mészkő alatt.',
+  'Could not load the elevation grid: ': 'A magassági rácsot nem sikerült betölteni: ',
+};
+const tr = s => HU && HU[s] || s;
+const dec = (x, d) => HU ? x.toFixed(d).replace('.', ',') : x.toFixed(d);
+const llTxt = (lat, lon, d) => HU ? `${dec(lat, d)}° é. sz. ${dec(-lon, d)}° ny. h.` : `${lat.toFixed(d)}°N ${(-lon).toFixed(d)}°W`;
+if (HU) {
+  document.documentElement.lang = 'hu'; document.title = tr(document.title);
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walk.nextNode());) { if (n.parentElement.closest('script, style')) continue; const t = n.nodeValue.trim(); if (t && HU[t]) n.nodeValue = n.nodeValue.replace(t, () => HU[t]); }
+  for (const el of document.body.querySelectorAll('[aria-label]')) el.setAttribute('aria-label', tr(el.getAttribute('aria-label')));
+}
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
@@ -332,21 +385,21 @@ function drawOverlay(w, h) {
     ctx.strokeStyle = 'rgba(243,241,234,.13)'; ctx.lineWidth = 1;
     for (let lat = 17; lat <= 25; lat++) { ctx.beginPath(); for (let lon = -94; lon <= -85; lon += .1) { const [x, y] = toScr(...fwd(lat, lon)); lon === -94 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
     for (let lon = -94; lon <= -85; lon++) { ctx.beginPath(); for (let lat = 17; lat <= 25; lat += .1) { const [x, y] = toScr(...fwd(lat, lon)); lat === 17 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
-    for (let lon = -93; lon <= -86; lon++) { const [x] = toScr(...fwd(21, lon)); if (x > 20 && x < w - 20) label(ctx, `${-lon}°W`, x + 4, h - 70, { font: '400 10.5px "Geist Mono", monospace', color: C.ink3, halo: 0 }); }
-    for (let lat = 18; lat <= 24; lat++) { const [, y] = toScr(...fwd(lat, -86)); if (y > 20 && y < h - 20) label(ctx, `${lat}°N`, w - 64, y - 7, { font: '400 10.5px "Geist Mono", monospace', color: C.ink3, halo: 0 }); }
+    for (let lon = -93; lon <= -86; lon++) { const [x] = toScr(...fwd(21, lon)); if (x > 20 && x < w - 20) label(ctx, (HU ? `${-lon}° ny. h.` : `${-lon}°W`), x + 4, h - 70, { font: '400 10.5px "Geist Mono", monospace', color: C.ink3, halo: 0 }); }
+    for (let lat = 18; lat <= 24; lat++) { const [, y] = toScr(...fwd(lat, -86)); if (y > 20 && y < h - 20) label(ctx, (HU ? `${lat}° é. sz.` : `${lat}°N`), w - 64, y - 7, { font: '400 10.5px "Geist Mono", monospace', color: C.ink3, halo: 0 }); }
   }
 
   if (on('rim')) {
     annulus(ctx, ctr, 90, 100, 'rgba(255,122,53,.08)');
     ctx.setLineDash([6, 5]); ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(255,122,53,.75)';
     circle(ctx, ctr, 90); ctx.stroke(); circle(ctx, ctr, 100); ctx.stroke(); ctx.setLineDash([]);
-    if (view.s > .55) arcText(ctx, 'CRATER RIM  180–200 km', ctr, 104.5, 0, C.ember, '600 11px Geist, system-ui, sans-serif');
+    if (view.s > .55) arcText(ctx, tr('CRATER RIM  180–200 km'), ctr, 104.5, 0, C.ember, '600 11px Geist, system-ui, sans-serif');
   }
   if (on('peak')) {
     annulus(ctx, ctr, 40, 45, 'rgba(245,208,107,.14)');
     ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(245,208,107,.8)';
     circle(ctx, ctr, 40); ctx.stroke(); circle(ctx, ctr, 45); ctx.stroke();
-    if (view.s > .9) arcText(ctx, 'PEAK RING', ctr, 49.5, 0, C.core, '600 10.5px Geist, system-ui, sans-serif');
+    if (view.s > .9) arcText(ctx, tr('PEAK RING'), ctr, 49.5, 0, C.core, '600 10.5px Geist, system-ui, sans-serif');
   }
   if (on('rim') || on('peak')) {
     const [x, y] = toScr(ctr[0], ctr[1]);
@@ -361,7 +414,7 @@ function drawOverlay(w, h) {
     ctx.setLineDash([2, 6]); ctx.lineWidth = 1.4; ctx.globalAlpha = .7;
     ctx.beginPath(); ctx.arc(x, y, rr, a1, a0 + Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]); ctx.globalAlpha = 1;
-    if (view.s > 1.6) arcText(ctx, 'RING OF CENOTES', cr.xy, cr.r_km + 4.5, 318, C.lake, '600 10.5px Geist, system-ui, sans-serif');
+    if (view.s > 1.6) arcText(ctx, tr('RING OF CENOTES'), cr.xy, cr.r_km + 4.5, 318, C.lake, '600 10.5px Geist, system-ui, sans-serif');
   }
   if (on('cenotes')) {
     const r = Math.max(1.6, Math.min(3.5, view.s * 1.6));
@@ -383,10 +436,10 @@ function drawOverlay(w, h) {
     ctx.lineTo(x1 - 13 * Math.cos(ang - .38), y1 - 13 * Math.sin(ang - .38)); ctx.lineTo(x1 - 13 * Math.cos(ang + .38), y1 - 13 * Math.sin(ang + .38)); ctx.fill();
     ctx.lineCap = 'butt';
     const [lx, ly] = toScr(ctr[0] + ux * 175, ctr[1] + uy * 175);
-    label(ctx, 'impactor, 45–60° from NE', lx + 9, ly - 9, { font: '500 11.5px Geist, system-ui, sans-serif', color: C.ember, rot: up, align: 'center' });
+    label(ctx, tr('impactor, 45–60° from NE'), lx + 9, ly - 9, { font: '500 11.5px Geist, system-ui, sans-serif', color: C.ember, rot: up, align: 'center' });
   }
   if (on('labels')) {
-    for (const r of regions) { const [x, y] = toScr(...fwd(r.lat, r.lon)); label(ctx, r.t, x, y, { font: r.f, color: 'rgba(243,241,234,.78)', align: 'center', rot: r.rot || 0, halo: 3 }); }
+    for (const r of regions) { const [x, y] = toScr(...fwd(r.lat, r.lon)); label(ctx, tr(r.t), x, y, { font: r.f, color: 'rgba(243,241,234,.78)', align: 'center', rot: r.rot || 0, halo: 3 }); }
     for (const p of feat.places) {
       if (p.kind === 'town' && view.s < .9) continue;
       const [x, y] = toScr(p.xy[0], p.xy[1]); if (x < -50 || y < -20 || x > w + 50 || y > h + 20) continue;
@@ -474,9 +527,9 @@ function readout(sx, sy) {
   const [x, y] = toKm(sx, sy), s = sampleH(x, y);
   if (!s) return;
   const [lat, lon] = inv(x, y), ctr = feat.centre.xy, d = Math.hypot(x - ctr[0], y - ctr[1]);
-  const elev = s.land ? `<b>${s.h.toFixed(s.h < 20 ? 1 : 0)} m</b> elevation` : `<b>${Math.round(-s.h).toLocaleString('en')} m</b> deep`;
-  const zone = d < 40 ? 'inside the peak ring' : d <= 45 ? 'on the peak ring' : d < 90 ? 'in the crater' : d <= 100 ? 'on the crater rim' : 'outside the crater';
-  $('#readout').innerHTML = `<span><b>${lat.toFixed(3)}°N ${(-lon).toFixed(3)}°W</b></span><span>${elev}</span><span><b>${d.toFixed(0)} km</b> from centre, ${zone}</span>`;
+  const elev = s.land ? `<b>${dec(s.h, s.h < 20 ? 1 : 0)} m</b> ${HU ? 'magasság' : 'elevation'}` : `<b>${Math.round(-s.h).toLocaleString(LANG)} m</b> ${HU ? 'mély' : 'deep'}`;
+  const zone = tr(d < 40 ? 'inside the peak ring' : d <= 45 ? 'on the peak ring' : d < 90 ? 'in the crater' : d <= 100 ? 'on the crater rim' : 'outside the crater');
+  $('#readout').innerHTML = `<span><b>${llTxt(lat, lon, 3)}</b></span><span>${elev}</span><span><b>${d.toFixed(0)} km</b> ${HU ? 'a középponttól' : 'from centre'}, ${zone}</span>`;
 }
 function pick(sx, sy) {
   const hit = hitSites.find(h => Math.hypot(h.x - sx, h.y - sy) < 14);
@@ -485,7 +538,7 @@ function pick(sx, sy) {
 function showDetail() {
   const el = $('#detail'), s = feat.sites.find(s => s.id === selected);
   el.hidden = !s; if (!s) return;
-  el.innerHTML = `<span class="k">${s.name} · ${s.lat.toFixed(3)}°N ${(-s.lon).toFixed(3)}°W · ${s.r_km} km from centre</span><p>${s.what}</p>`;
+  el.innerHTML = `<span class="k">${s.name} · ${llTxt(s.lat, s.lon, 3)} · ${dec(s.r_km, 1)} km ${HU ? 'a középponttól' : 'from centre'}</span><p>${tr(s.what)}</p>`;
   if (window.innerWidth <= 640) setFold(false);
 }
 
@@ -504,9 +557,9 @@ function swatch(id) {
 }
 function buildLayers() {
   const cr = feat.cenote_ring;
-  layers.find(l => l.id === 'cenring').d = `Circle fitted to ${cr.n} cenotes: ${(cr.r_km * 2).toFixed(0)} km across, ±${cr.sd_km.toFixed(1)} km. Centre ${cr.offset_km.toFixed(0)} km east of the gravity centre.`;
-  layers.find(l => l.id === 'cenotes').d = `${feat.cenotes.length} sinkholes mapped in OpenStreetMap. Mapping is uneven, so gaps are not absences.`;
-  $('#layers').innerHTML = layers.map(l => `<button class="layer" id="ly-${l.id}" aria-pressed="${l.on}">${swatch(l.sw)}<span><span class="t">${l.t}</span><span class="d">${l.d}</span></span><span class="chk" aria-hidden="true"></span></button>`).join('');
+  layers.find(l => l.id === 'cenring').d = HU ? `${cr.n} cenotéra illesztett kör: ${(cr.r_km * 2).toFixed(0)} km átmérő, ±${dec(cr.sd_km, 1)} km. Középpontja ${cr.offset_km.toFixed(0)} km-rel keletre van a gravitációs középponttól.` : `Circle fitted to ${cr.n} cenotes: ${(cr.r_km * 2).toFixed(0)} km across, ±${cr.sd_km.toFixed(1)} km. Centre ${cr.offset_km.toFixed(0)} km east of the gravity centre.`;
+  layers.find(l => l.id === 'cenotes').d = HU ? `${feat.cenotes.length} víznyelő az OpenStreetMap térképén. A feltérképezés egyenetlen, így a hiányok nem jelentik azt, hogy ott nincs cenote.` : `${feat.cenotes.length} sinkholes mapped in OpenStreetMap. Mapping is uneven, so gaps are not absences.`;
+  $('#layers').innerHTML = layers.map(l => `<button class="layer" id="ly-${l.id}" aria-pressed="${l.on}">${swatch(l.sw)}<span><span class="t">${tr(l.t)}</span><span class="d">${tr(l.d)}</span></span><span class="chk" aria-hidden="true"></span></button>`).join('');
   for (const l of layers) $('#ly-' + l.id).onclick = e => { l.on = !l.on; e.currentTarget.setAttribute('aria-pressed', l.on); draw(); };
 }
 
@@ -521,7 +574,7 @@ function setEx(fromInput) {
 }
 $('#ex').addEventListener('input', () => setEx(true));
 
-function setFold(f) { $('#card').classList.toggle('folded', f); $('#toggleCard').textContent = f ? 'Show details' : 'Hide details'; $('#toggleCard').setAttribute('aria-expanded', !f); }
+function setFold(f) { $('#card').classList.toggle('folded', f); $('#toggleCard').textContent = tr(f ? 'Show details' : 'Hide details'); $('#toggleCard').setAttribute('aria-expanded', !f); }
 $('#toggleCard').onclick = () => setFold(!$('#card').classList.contains('folded'));
 
 // ---------- load ----------
@@ -552,6 +605,8 @@ async function load() {
   window.__dbg = { view, draw, fit, meta, feat };
 }
 window.addEventListener('resize', resize);
-load().catch(err => { $('#loading').textContent = 'Could not load the elevation grid: ' + err.message; });
+$('#langBtn').textContent = HU ? 'English' : 'Magyar'; $('#langBtn').lang = HU ? 'en' : 'hu';
+$('#langBtn').addEventListener('click', () => { try { localStorage.setItem('chicxulub.lang', HU ? 'en' : 'hu'); } catch (_) {} const u = new URL(location.href); u.searchParams.set('lang', HU ? 'en' : 'hu'); location.replace(u); });
+load().catch(err => { $('#loading').textContent = tr('Could not load the elevation grid: ') + err.message; });
 })();
 </script>

@@ -67,6 +67,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .names { position: relative; width: 0; transition: width .3s var(--ease); }
 .strata:hover .names, .strata:focus-within .names { width: 86px; }
+:root[lang="hu"] .strata { grid-template-columns: auto 16px 66px; }
+:root[lang="hu"] .strata:hover .names, :root[lang="hu"] .strata:focus-within .names { width: 124px; }
 .name {
   position: absolute; right: 10px; transform: translateY(50%); padding: 3px 0; border: 0; background: none;
   font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; color: var(--ink-2);
@@ -231,6 +233,7 @@ body:not(.show-sites) .label.kpg { display: none; }
   .dock > button, .modes button { padding: 0 11px; }
   .col { height: 40vh; }
   .strata { right: 10px; grid-template-columns: auto 14px 50px; padding: 12px 2px 10px 10px; }
+  :root[lang="hu"] .strata { grid-template-columns: auto 14px 66px; }
   .credit { font-size: 9.5px; }
   .sheet { padding: 18px 18px 20px; }
 }
@@ -374,6 +377,7 @@ body:not(.long-mode) .climate { display: none !important; }
 </div>
 
 <div class="pop" id="optsPop" hidden>
+  <div class="row"><span>Language</span><span class="seg2" role="group" aria-label="Language"><button id="langEn" type="button" aria-pressed="true" lang="en">English</button><button id="langHu" type="button" aria-pressed="false" lang="hu">Magyar</button></span></div>
   <h2>Scene</h2>
   <div class="row"><span>Relief</span><span class="seg2" role="group" aria-label="Vertical exaggeration"><button id="ex1" type="button" aria-pressed="true">1×</button><button id="ex3" type="button" aria-pressed="false">3×</button><button id="ex6" type="button" aria-pressed="false">6×</button></span></div>
   <div class="row"><span>Cut</span><span class="seg2" role="group" aria-label="Cross-section"><button id="cutOff" type="button" aria-pressed="false">None</button><button id="cutNS" type="button" aria-pressed="true">N–S</button><button id="cutTr" type="button" aria-pressed="false">Impact path</button></span></div>
@@ -495,6 +499,23 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
+// Language: the English text is in the page and the code; hu.js maps it to Hungarian (long texts by their first 60 characters)
+const LANG = (() => { const q = new URLSearchParams(location.search).get('lang'); if (q) return q === 'hu' ? 'hu' : 'en'; try { return localStorage.getItem('chicxulub.lang') === 'hu' ? 'hu' : 'en'; } catch (_) { return 'en'; } })();
+const I18N = LANG === 'hu' ? (await import('./hu.js')).default : null;
+const tkey = s => s.length > 80 ? s.slice(0, 60) : s;
+const tr = (s, v) => { const o = I18N && I18N.t[tkey(s)] || s; return v ? o.replace(/\{(\w+)(?:\|(\w+))?\}/g, (_, k, f) => f ? I18N.f[f](String(v[k])) : v[k]) : o; };
+const dec = s => I18N ? String(s).replace('.', ',') : String(s);            // decimal comma in Hungarian
+const fix = (x, d) => dec(x.toFixed(d));
+const grp = x => x.toLocaleString(LANG);
+const ns = (v, d) => I18N ? `${fix(Math.abs(v), d)}° ${v >= 0 ? 'é. sz.' : 'd. sz.'}` : `${Math.abs(v).toFixed(d)}° ${v >= 0 ? 'N' : 'S'}`;
+const ew = (v, d) => I18N ? `${fix(Math.abs(v), d)}° ${v >= 0 ? 'k. h.' : 'ny. h.'}` : `${Math.abs(v).toFixed(d)}° ${v >= 0 ? 'E' : 'W'}`;
+if (I18N) {
+  document.documentElement.lang = 'hu'; document.title = tr(document.title);
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walk.nextNode());) { if (n.parentElement.closest('script, style')) continue; const t = n.nodeValue.trim(); if (t && tkey(t) in I18N.t) n.nodeValue = n.nodeValue.replace(t, () => tr(t)); }
+  for (const el of document.body.querySelectorAll('[title], [aria-label]')) for (const a of ['title', 'aria-label']) if (el.hasAttribute(a)) el.setAttribute(a, tr(el.getAttribute(a)));
+}
+
 const $ = id => document.getElementById(id);
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
@@ -503,7 +524,7 @@ const SMALL = Math.min(innerWidth, innerHeight) < 700 || /Mobi|Android|iPhone|iP
 
 // ---------- data ----------
 let loaded = 0; const toLoad = 5;
-const tick = () => { ++loaded; $('loadBar').style.width = (100 * loaded / toLoad) + '%'; $('loadMsg').textContent = `Loading the target · ${loaded} / ${toLoad}`; };
+const tick = () => { ++loaded; $('loadBar').style.width = (100 * loaded / toLoad) + '%'; $('loadMsg').textContent = tr('Loading the target · {a} / {b}', { a: loaded, b: toLoad }); };
 const webp = url => url.replace(/\.png$/, '.webp');      // the pipeline's PNGs, re-encoded losslessly (pipeline/webp.py)
 async function loadPng16(url) {
   const blob = await (await fetch(webp(url))).blob();
@@ -525,7 +546,7 @@ const metaP = fetch('data/meta.json', { cache: 'no-store' }).then(r => r.json())
 const [META, wRaw, sRaw, gHraw, gWraw] = await Promise.all([
   metaP.then(m => (tick(), m)),
   loadPng16('data/paleo.png'), loadPng16('data/sed.png'), loadPx('data/gulf_h.png'), loadPx('data/gulf_w.png'),
-]).catch(err => { $('loadMsg').textContent = 'Could not load the target data. Reload the page to try again.'; throw err; });
+]).catch(err => { $('loadMsg').textContent = tr('Could not load the target data. Reload the page to try again.'); throw err; });
 const N = META.N, HALF = META.half, BOTTOM = META.crust.bottom_m;
 const W66 = new Float32Array(N * N), SED = new Float32Array(N * N), half = new Uint16Array(N * N * 2);
 for (let i = 0; i < N * N; i++) {
@@ -586,6 +607,7 @@ const tNoise = (() => {
   return t;
 })();
 const LAYERS = META.layers;
+if (I18N) for (const st of META.sites.list) Object.assign(st, I18N.sites[st.name]);
 const FRAC = LAYERS.map(L => L.frac);
 
 // ---------- timeline: from three hours before the impact to 100,000 years after ----------
@@ -1958,18 +1980,18 @@ for (const b of BANDS) {
   d.style.cssText = `bottom:${b.p0 * 100}%;height:${(b.p1 - b.p0) * 100 + 0.2}%;--c:${st.c};--c2:${st.c2 || st.c}`;
   $('fill').appendChild(d);
   const n = document.createElement('button');
-  n.type = 'button'; n.className = 'name'; n.textContent = st.name; n.style.bottom = (b.p0 + b.p1) / 2 * 100 + '%';
+  n.type = 'button'; n.className = 'name'; n.textContent = tr(st.name); n.style.bottom = (b.p0 + b.p1) / 2 * 100 + '%';
   n.addEventListener('click', () => goTo(b.anchor));
   $('names').appendChild(n); b.el = n;
 }
 {
-  const add = (p, text, cls) => { const k = document.createElement('span'); k.className = 'mt' + (cls ? ' ' + cls : ''); k.style.bottom = p * 100 + '%'; k.textContent = text; $('mticks').appendChild(k); };
+  const add = (p, text, cls) => { const k = document.createElement('span'); k.className = 'mt' + (cls ? ' ' + cls : ''); k.style.bottom = p * 100 + '%'; k.textContent = tr(text); $('mticks').appendChild(k); };
   add(0, '−3 h', 'end');
   for (const [t, l] of [[-3600, '−1 h'], [0, 'impact'], [60, '1 min'], [600, '10 min'], [3600, '1 h'], [36000, '10 h']]) add(pOfT(t), l);
   for (const [t, l] of [[172800, '2 days'], [30 * 86400, '1 mo'], [YEAR, '1 yr'], [10 * YEAR, '10 yr']]) add(pOfT(t), l);
   add(1, '100 kyr', 'end');
   for (const [p, title] of [[0.12 * PS, 'The time scale changes here: hours below, seconds and minutes above'], [0.57 * PS, 'The time scale changes again: hours above'], [PS, 'And again: from here up, each step is ten times longer, from days to 100,000 years']]) {
-    const u = document.createElement('div'); u.className = 'unc'; u.style.bottom = p * 100 + '%'; u.title = title; $('fill').appendChild(u);
+    const u = document.createElement('div'); u.className = 'unc'; u.style.bottom = p * 100 + '%'; u.title = tr(title); $('fill').appendChild(u);
   }
 }
 
@@ -1987,36 +2009,37 @@ const LEG = [
 $('legendList').innerHTML = LEG.map(r => {
   const sw = r.k === 'evap' ? `repeating-linear-gradient(0deg, ${LITH_HEX.evap} 0 3px, #9d8b67 3px 5px)` : r.k === 'water' ? 'linear-gradient(#1b6c7c, #071a2b)'
     : r.k === 'melt' ? 'radial-gradient(circle at 40% 40%, #ffb35a, #d2440f 55%, #3a0d06)' : r.k === 'brec' ? `radial-gradient(circle at 30% 40%, #c2b088 0 2px, transparent 2.5px) 0 0 / 7px 7px, ${LITH_HEX.brec}` : LITH_HEX[r.k];
-  return `<li id="lg-${r.k}"><span class="sw" style="background:${sw}"></span><span class="nm">${r.name}${r.ag ? `<span class="ag">${r.ag}</span>` : ''}</span><span class="th" id="th-${r.k}"></span></li>`;
+  return `<li id="lg-${r.k}"><span class="sw" style="background:${sw}"></span><span class="nm">${tr(r.name)}${r.ag ? `<span class="ag">${tr(r.ag)}</span>` : ''}</span><span class="th" id="th-${r.k}"></span></li>`;
 }).join('');
-const fmtLong = t => { const d = t / 86400, y = t / YEAR; return d < 13.5 ? `${Math.round(d)} days` : d < 61 ? `${Math.round(d / 7)} weeks` : y < 1.95 ? `${Math.round(y * 12)} months` : y < 19.5 ? `${y.toFixed(1)} years` : `${Math.round(Number(y.toPrecision(2))).toLocaleString('en')} years`; };
-const fmtHM = x => `${Math.floor(x / 3600)} h ${String(Math.floor((x % 3600) / 60)).padStart(2, '0')} min`;
-const fmtM = m => m >= 9500 ? `${(m / 1000).toFixed(0)} km` : m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
+const fmtLong = t => { const d = t / 86400, y = t / YEAR; return d < 13.5 ? tr('{n} days', { n: Math.round(d) }) : d < 61 ? tr('{n} weeks', { n: Math.round(d / 7) }) : y < 1.95 ? tr('{n} months', { n: Math.round(y * 12) }) : y < 19.5 ? tr('{n} years', { n: fix(y, 1) }) : tr('{n} years', { n: grp(Math.round(Number(y.toPrecision(2)))) }); };
+const fmtHM = x => tr('{h} h {m} min', { h: Math.floor(x / 3600), m: String(Math.floor((x % 3600) / 60)).padStart(2, '0') });
+const fmtM = m => m >= 9500 ? `${fix(m / 1000, 0)} km` : m >= 1000 ? `${fix(m / 1000, 1)} km` : `${Math.round(m)} m`;
 let legT = 0;
 function updateLegend(force) {
   const now = performance.now(); if (!force && now - legT < 120) return; legT = now;
   const c = columnAt(0, 0), set = (k, v, on) => { $('th-' + k).textContent = v; $('lg-' + k).classList.toggle('off', !on); };
   const hit = S.imp.t > 0;
-  set('water', c.water > 0 ? fmtM(c.water) : hit ? 'blasted away' : 'land', c.water > 0);
+  set('water', c.water > 0 ? fmtM(c.water) : tr(hit ? 'blasted away' : 'land'), c.water > 0);
   [['pk', 0], ['melt', 1], ['brec', 2]].forEach(([k, i]) => { $('lg-' + k).hidden = !hit; set(k, c.dp[i] >= 1 ? fmtM(c.dp[i]) : '–', c.dp[i] >= 1); });
-  LAYERS.forEach((L, i) => set(L.id, c.th[i] >= 1 ? fmtM(c.th[i]) : hit ? 'gone' : '–', c.th[i] >= 1));
-  set('ucrust', c.uc >= 1 ? fmtM(c.uc) : 'gone', c.uc >= 1);
+  LAYERS.forEach((L, i) => set(L.id, c.th[i] >= 1 ? fmtM(c.th[i]) : hit ? tr('gone') : '–', c.th[i] >= 1));
+  set('ucrust', c.uc >= 1 ? fmtM(c.uc) : tr('gone'), c.uc >= 1);
   set('lcrust', fmtM(c.lc), true);
-  set('mantle', `from ${fmtM(c.moho)}`, true);
+  set('mantle', tr('from {d}', { d: fmtM(c.moho) }), true);
   $('legendNote').textContent = hit
-    ? (c.sf < 0 ? `Surface ${fmtM(-c.sf)} below sea level, ` : `Surface ${fmtM(c.sf)} above sea level, `) + `Moho at ${fmtM(c.moho)}. Shown at the impact point; drag through time to watch the column change.`
-    : `${fmtM(c.sed)} of sediment on the crystalline crust. Thicknesses change across the block: the pile is thickest to the north-north-east.`;
+    ? tr(c.sf < 0 ? 'Surface {d} below sea level, ' : 'Surface {d} above sea level, ', { d: fmtM(Math.abs(c.sf)) }) + tr('Moho at {d}. Shown at the impact point; drag through time to watch the column change.', { d: fmtM(c.moho) })
+    : tr('{d} of sediment on the crystalline crust. Thicknesses change across the block: the pile is thickest to the north-north-east.', { d: fmtM(c.sed) });
 }
 
 function updateHud() {
-  const [name, text] = STAGES[S.phase];
+  const [name, text] = STAGES[S.phase].map(x => tr(x));
   $('stageName').textContent = name; $('stageText').textContent = text;
   const ma = S.ma, t = S.imp.t, imp = IMPACT_PH.has(S.phase);
-  const time = '66.04 Ma';
-  const mmss = x => `${Math.floor(x / 60)} min ${String(Math.floor(x % 60)).padStart(2, '0')} s`;
-  const clock = !imp ? { crust: 'Carboniferous to Triassic', rift: 'Jurassic', evap: 'Early Cretaceous', platform: 'Late Cretaceous', ramp: 'latest Cretaceous', eve: 'moments before impact' }[S.phase]
-    : S.phase === 'crater' ? '10 minutes after impact' : t >= 172800 ? `${fmtLong(t)} after impact` : t <= -3600 ? `${fmtHM(-t)} before impact` : t <= -60 ? `${Math.round(-t / 60)} min before impact` : t <= 0 ? `${(-t).toFixed(1)} s before impact` : t < 60 ? `${t.toFixed(1)} s after impact`
-    : t < 3600 ? `${mmss(t)} after impact` : `${fmtHM(t)} after impact`;
+  const time = tr('66.04 Ma');
+  const mmss = x => tr('{m} min {s} s', { m: Math.floor(x / 60), s: String(Math.floor(x % 60)).padStart(2, '0') });
+  const after = x => tr('{t} after impact', { t: x });
+  const clock = !imp ? tr({ crust: 'Carboniferous to Triassic', rift: 'Jurassic', evap: 'Early Cretaceous', platform: 'Late Cretaceous', ramp: 'latest Cretaceous', eve: 'moments before impact' }[S.phase])
+    : S.phase === 'crater' ? tr('10 minutes after impact') : t >= 172800 ? after(fmtLong(t)) : t <= -3600 ? tr('{t} before impact', { t: fmtHM(-t) }) : t <= -60 ? tr('{n} min before impact', { n: Math.round(-t / 60) }) : t <= 0 ? tr('{n} s before impact', { n: fix(-t, 1) }) : t < 60 ? tr('{n} s after impact', { n: fix(t, 1) })
+    : t < 3600 ? after(mmss(t)) : after(fmtHM(t));
   $('time').textContent = time; $('clock').textContent = clock;
   $('cursor').style.bottom = P * 100 + '%';
   colEl.setAttribute('aria-valuenow', String(Math.round(P * 1000))); colEl.setAttribute('aria-valuetext', `${time}, ${name}`);
@@ -2028,7 +2051,7 @@ function setP(p) { P = clamp(p, 0, 1); }
 let playing = false, goAnim = null;
 function setPlaying(v) {
   playing = v; if (v) goAnim = null;
-  $('play').setAttribute('aria-label', v ? 'Pause' : 'Play'); $('play').title = v ? 'Pause (P)' : 'Play (P)';
+  $('play').setAttribute('aria-label', tr(v ? 'Pause' : 'Play')); $('play').title = tr(v ? 'Pause (P)' : 'Play (P)');
   $('playIcon').innerHTML = v ? '<path d="M4 3h4v14H4zM12 3h4v14h-4z"/>' : '<path d="M5 3l12 7-12 7z"/>';
 }
 const togglePlay = () => { tour = null; if (!playing && P >= 0.999) setP(0); setPlaying(!playing); };
@@ -2073,7 +2096,7 @@ function chapter(dir) {
 
 function setStory(open) {
   $('stageText').hidden = !open; $('more').setAttribute('aria-expanded', String(open));
-  $('more').firstElementChild.textContent = open ? 'Less' : 'About this moment'; pref('story', open ? '1' : '0');
+  $('more').firstElementChild.textContent = tr(open ? 'Less' : 'About this moment'); pref('story', open ? '1' : '0');
 }
 setStory(pref('story') === '1');
 $('more').addEventListener('click', () => setStory($('stageText').hidden));
@@ -2099,6 +2122,7 @@ bindSwitch('tSites', 'sites', true, on => document.body.classList.toggle('show-s
 bindSwitch('tCoords', 'coords', false, on => document.body.classList.toggle('show-coords', on));
 bindSwitch('tRim', 'rim', true, on => { showRim = on; rimLines.visible = peakLines.visible = on && S.imp.t <= 0; });
 [['qAuto', 'auto'], ['qHigh', 'high'], ['qLow', 'low']].forEach(([id, q]) => { $(id).setAttribute('aria-pressed', String(q === QUALITY)); $(id).addEventListener('click', () => { if (q === QUALITY) return; pref('quality', q); location.reload(); }); });
+[['langEn', 'en'], ['langHu', 'hu']].forEach(([id, l]) => { $(id).setAttribute('aria-pressed', String(l === LANG)); $(id).addEventListener('click', () => { if (l === LANG) return; pref('lang', l); const u = new URL(location.href); u.searchParams.set('lang', l); location.replace(u); }); });
 function setFires(m, quiet) {                 // 0 off, 1 patchy, 2 firestorm
   U.uFire.value.x = m; pref('fires', String(m));
   [['fireOff', 0], ['fireNear', 1], ['fireAll', 2]].forEach(([id, v]) => $(id).setAttribute('aria-pressed', String(v === m)));
@@ -2296,7 +2320,7 @@ const MODE_HINT = {
   fly: 'Fly · drag to look · WASD to move · Space / C up and down · Esc to leave',
 };
 let hintTimer = 0;
-function updateModeHint() { const h = $('modeHint'); h.textContent = MODE_HINT[camMode]; h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 5000); }
+function updateModeHint() { const h = $('modeHint'); h.textContent = tr(MODE_HINT[camMode]); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 5000); }
 
 const dom = renderer.domElement;
 dom.addEventListener('dblclick', e => {
@@ -2462,19 +2486,19 @@ function updateNavUI(dt) {
   else bearing = Math.atan2(_dir.x + _dirF.x, -_dir.z - _dirF.z) * 180 / Math.PI;
   $('needle').setAttribute('transform', `rotate(${-bearing} 20 20)`);
   if ((infoT += dt) < 0.15) return; infoT = 0;
-  if (globeMode) { const [lo, la] = llOfWorld(camera.position); $('camInfo').textContent = `The Earth 66 million years ago · seen from ${Math.round(altitude() / 1000).toLocaleString('en')} km\nabove ${Math.abs(la).toFixed(0)}° ${la >= 0 ? 'N' : 'S'} ${Math.abs(lo).toFixed(0)}° ${lo >= 0 ? 'E' : 'W'} (66 Ma coordinates)`; return; }
+  if (globeMode) { const [lo, la] = llOfWorld(camera.position); $('camInfo').textContent = tr('The Earth 66 million years ago · seen from {km} km\nabove {la} {lo} (66 Ma coordinates)', { km: grp(Math.round(altitude() / 1000)), la: ns(la, 0), lo: ew(lo, 0) }); return; }
   const t = unbendV(controls.target), inside = Math.abs(t.x) <= HALF && Math.abs(t.z) <= HALF;
   const [lat, lon] = latLon(t.x, t.z), c = inside ? columnAt(t.x, t.z) : null;
   const km = Math.hypot(t.x, t.z) / 1000;
   if (!c && gulfOn() && Math.abs(t.x) < GHALF && Math.abs(t.z) < GHALF) {
     const g = gulfAt(t.x, t.z);
-    $('camInfo').textContent = `${lat.toFixed(2)}° N  ${(-lon).toFixed(2)}° W · ${km.toFixed(0)} km from impact point\n` +
-      (g[3] > 0.5 ? `land at 66 Ma, ${Math.round(g[0]).toLocaleString('en')} m` + (g[2] > 0.5 && g[1] < 64000 ? ` · flooded ${fmtHM(g[1])} after impact, up to ${Math.round(g[2])} m deep` : '')
-        : `sea ${Math.round(-g[0]).toLocaleString('en')} m deep` + (g[1] < 64000 ? ` · wave arrives ${fmtHM(g[1])} after impact, up to ${Math.round(g[2] / 10) * 10} m high` : ''));
+    $('camInfo').textContent = tr('{la}  {lo} · {km} km from impact point\n', { la: ns(lat, 2), lo: ew(lon, 2), km: km.toFixed(0) }) +
+      (g[3] > 0.5 ? tr('land at 66 Ma, {h} m', { h: grp(Math.round(g[0])) }) + (g[2] > 0.5 && g[1] < 64000 ? tr(' · flooded {t} after impact, up to {h} m deep', { t: fmtHM(g[1]), h: Math.round(g[2]) }) : '')
+        : tr('sea {h} m deep', { h: grp(Math.round(-g[0])) }) + (g[1] < 64000 ? tr(' · wave arrives {t} after impact, up to {h} m high', { t: fmtHM(g[1]), h: Math.round(g[2] / 10) * 10 }) : ''));
     return;
   }
-  $('camInfo').textContent = `${lat.toFixed(3)}° N  ${(-lon).toFixed(3)}° W · ${km.toFixed(0)} km from impact point\n` +
-    (c ? (c.water > 0 ? `${Math.round(c.water).toLocaleString('en')} m of water` : `${c.sf < 0 ? 'dry floor' : 'land'}, ${Math.round(c.sf).toLocaleString('en')} m`) + ` · ${fmtM(c.sed)} of sediment · ${Math.round((bearing + 360) % 360)}°` : 'outside the block');
+  $('camInfo').textContent = tr('{la}  {lo} · {km} km from impact point\n', { la: ns(lat, 3), lo: ew(lon, 3), km: km.toFixed(0) }) +
+    (c ? (c.water > 0 ? tr('{h} m of water', { h: grp(Math.round(c.water)) }) : `${tr(c.sf < 0 ? 'dry floor' : 'land')}, ${grp(Math.round(c.sf))} m`) + tr(' · {d} of sediment · {b}°', { d: fmtM(c.sed), b: Math.round((bearing + 360) % 360) }) : tr('outside the block'));
 }
 $('compass').addEventListener('click', northUp);
 for (const [id, m] of [['mOrbit', 'orbit'], ['mFly', 'fly']]) $(id).addEventListener('click', () => setMode(m));
@@ -2542,7 +2566,7 @@ const groundTop = (x, z) => { const s = surfaceAt(x, z); return s.wet ? Math.max
 const LABELS = [
   { text: 'Impact point', x: 0, z: 0, kind: 'impact', when: I => I.t <= 0 },
   { text: 'Asteroid', kind: 'phase', world: true, at: I => I.t < -0.5 ? (() => { const d = V_IMP * -I.t, sf0 = seafloor(0, 0); return [DIR_IN.x * d, sf0 * exag + DIR_IN.y * d, DIR_IN.z * d]; })() : null,
-    textOf: I => `Asteroid · ${Math.round(V_IMP * -I.t / 1000).toLocaleString('en')} km away` },
+    textOf: I => tr('Asteroid · {km} km away', { km: grp(Math.round(V_IMP * -I.t / 1000)) }) },
   ...META.labels.map(L => ({ ...L })),
   ...GM.labels.map(L => ({ ...L, gulf: true, kind: L.kind, name: L.text })),
   { text: 'Ejecta curtain', kind: 'phase', at: I => I.t > 8 && I.t < 150 ? (() => { const r = Math.max(I.Rr * 1.15, I.rLand + 20000); const p = along(r, 0); p[1] = Math.max(p[1], 0) + 30000; return p; })() : null },
@@ -2551,7 +2575,7 @@ const LABELS = [
   { text: 'Peak ring', kind: 'phase', at: I => I.t > 320 ? along(42000, 800) : null },
   { text: 'Melt sheet', kind: 'phase', at: I => I.t > 420 ? along(12000, 600) : null },
   { text: 'Terraced rim', kind: 'phase', at: I => I.t > 450 ? along(78000, 800) : null },
-].map(L => { const el = document.createElement('div'); el.className = 'label ' + L.kind; el.textContent = L.text; document.body.appendChild(el); return { ...L, el, lift: L.kind === 'impact' ? 1200 : 400 }; });
+].map(L => { const el = document.createElement('div'); el.className = 'label ' + L.kind; el.textContent = tr(L.text); document.body.appendChild(el); return { ...L, el, lift: L.kind === 'impact' ? 1200 : 400 }; });
 const v3 = new THREE.Vector3();
 function updateLabels() {
   const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight, I = S.imp;
@@ -2564,7 +2588,7 @@ function updateLabels() {
     else if (L.gulf) {
       vis = gulfOn();
       if (vis && L.kind === 'town' && L.arrive_s) {
-        const txt = I.t < L.arrive_s ? `${L.name} · wave at ${fmtHM(L.arrive_s)}` : `${L.name} · wave at ${fmtHM(L.arrive_s)}, ~${L.height_m} m`;
+        const txt = tr(I.t < L.arrive_s ? '{name} · wave at {t}' : '{name} · wave at {t}, ~{h} m', { name: tr(L.name), t: fmtHM(L.arrive_s), h: L.height_m });
         if (L.el.textContent !== txt) L.el.textContent = txt;
       }
       bendV(L.x, (L.kind === 'water' ? 0 : Math.max(0, gulfAt(L.x, L.z)[0]) + 4000) * exag, L.z, v3);
@@ -2660,7 +2684,7 @@ let streamNote = 0;
 function streamNeeded(t) {
   for (const [t0, fn, ready, what] of NEEDS) if (t >= t0 && !ready()) {
     fn();
-    { if (performance.now() - streamNote > 4000) { streamNote = performance.now(); const h = $('modeHint'); h.textContent = `Loading ${what}…`; h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 2500); } }
+    { if (performance.now() - streamNote > 4000) { streamNote = performance.now(); const h = $('modeHint'); h.textContent = tr('Loading {what}…', { what: tr(what) }); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 2500); } }
   }
 }
 
@@ -2669,7 +2693,7 @@ const GLABELS = [];
 // fossil sites and boundary sections (pipeline/sites.py): today's places moved to 66 Ma with the PALEOMAP plate model
 const SITES = (META.sites ? META.sites.list : []).map(st => {
   const el = document.createElement('div'); el.className = 'label glabel kpg ' + st.kind; el.textContent = st.name;
-  el.title = `${st.place} · ${st.kind === 'fossil' ? 'fossil site' : 'boundary section'} · click for what its rocks show`;
+  el.title = `${st.place} · ${tr(st.kind === 'fossil' ? 'fossil site · click for what its rocks show' : 'boundary section · click for what its rocks show')}`;
   el.addEventListener('click', () => { ensureGlobe().catch(() => {}).then(() => probeAt(st.plon, st.plat, st)); });
   document.body.appendChild(el);
   const L = { text: st.name, v: worldOfLL(st.plon, st.plat, 1.001), kind: 'kpg', el, site: st }; GLABELS.push(L); return L;
@@ -2800,7 +2824,7 @@ void main() {
       fragmentShader: FS_HEAD + 'void main() {\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(0.75, 0.85, 0.9, 0.35); }' }));
     coastG.name = 'todayCoast'; coastG.visible = showCoast; coastG.matrixAutoUpdate = false; coastG.matrix.copy(EARTH_M); coastG.frustumCulled = false; scene.add(coastG);
     for (const L of [{ text: 'Chicxulub', v: worldOfLL(GLB.impact.lon, GLB.impact.lat, 1.004), kind: 'impact' }, ...GLB.labels.map(L => ({ text: L.text, v: worldOfLL(L.lon, L.lat, 1.001), kind: 'water' }))]) {
-      const el = document.createElement('div'); el.className = 'label glabel ' + L.kind; el.textContent = L.text; document.body.appendChild(el); GLABELS.push({ ...L, el });
+      const el = document.createElement('div'); el.className = 'label glabel ' + L.kind; el.textContent = tr(L.text); document.body.appendChild(el); GLABELS.push({ ...L, el });
     }
   })();
   return globeReady;
@@ -2880,9 +2904,9 @@ const probePin = new THREE.Points(new THREE.BufferGeometry().setAttribute('posit
   fragmentShader: FS_HEAD + 'void main() {\n#include <logdepthbuf_fragment>\n float r = length(gl_PointCoord * 2.0 - 1.0); if (r > 1.0) discard; gl_FragColor = vec4(vec3(1.0, 0.48, 0.21) * (r > 0.6 ? 1.0 : 0.25), r > 0.6 ? 1.0 : 0.6); }',
 }));
 probePin.visible = false; probePin.renderOrder = 9; probePin.frustumCulled = false; scene.add(probePin);
-const sig2 = x => x >= 100 ? Math.round(Number(x.toPrecision(2))).toLocaleString('en') : Number(x.toPrecision(2)).toString();
-const fmtW = w => (w >= 9.9e6 ? 'more than ' : 'about ') + (w >= 1e6 ? sig2(w / 1e6) + ' MW/m²' : sig2(w / 1000) + ' kW/m²');
-const fmtDur = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : fmtHM(s);
+const sig2 = x => x >= 100 ? grp(Math.round(Number(x.toPrecision(2)))) : dec(Number(x.toPrecision(2)));
+const fmtW = w => tr(w >= 9.9e6 ? 'more than {v}' : 'about {v}', { v: w >= 1e6 ? sig2(w / 1e6) + ' MW/m²' : sig2(w / 1000) + ' kW/m²' });
+const fmtDur = s => s < 90 ? tr('{n} s', { n: Math.round(s) }) : s < 5400 ? tr('{n} min', { n: Math.round(s / 60) }) : fmtHM(s);
 function probeAt(lon, lat, site = null) {
   probeState.on = true; probeState.lon = lon; probeState.lat = lat; probeState.site = site;
   probePin.position.copy(worldOfLL(lon, lat, 1.0008)); probePin.visible = true;
@@ -2893,35 +2917,35 @@ function probeAt(lon, lat, site = null) {
   const sec = [];
   // air blast
   const p = overP(r), u = windU(p), tb = blastT(r);
-  sec.push(['Air blast', '#dce8ff', r <= 3.0e6
-    ? `Arrives <b>${fmtDur(tb)}</b> after impact. Peak overpressure about <b>${p >= 1e5 ? (p / 1e5).toFixed(1) + ' bar' : Math.round(p / 1000) + ' kPa'}</b>, winds about <b>${Math.round(u)} m/s</b>${u > 62 ? ' (forests flattened)' : u > 40 ? ' (many trees down)' : ''}.`
-    : `The pressure pulse arrives about <b>${fmtDur(tb)}</b> after impact and keeps circling the globe. The overpressure formula is not reliable this far out.`]);
+  sec.push([tr('Air blast'), '#dce8ff', r <= 3.0e6
+    ? tr('Arrives <b>{t}</b> after impact. Peak overpressure about <b>{p}</b>, winds about <b>{u} m/s</b>{note}.', { t: fmtDur(tb), p: p >= 1e5 ? fix(p / 1e5, 1) + ' bar' : Math.round(p / 1000) + ' kPa', u: Math.round(u), note: u > 62 ? tr(' (forests flattened)') : u > 40 ? tr(' (many trees down)') : '' })
+    : tr('The pressure pulse arrives about <b>{t}</b> after impact and keeps circling the globe. The overpressure formula is not reliable this far out.', { t: fmtDur(tb) })]);
   // seismic
   const meff = Meff(rkm), [mmi, mv] = MMI(meff);
   const tP = adeg <= 100 ? interp(TT_DEG, TT_P, adeg) : null, tS = adeg <= 100 ? interp(TT_DEG, TT_S, adeg) : null;
-  sec.push(['Seismic waves', '#ff9a52', `${tP !== null ? `P waves at <b>${fmtDur(tP)}</b>, S waves at <b>${fmtDur(tS)}</b>; ` : (adeg < 142 ? 'In the core shadow: no direct P or S waves arrive; ' : `P waves refracted through the core arrive at about <b>${fmtDur(1150 + (adeg - 142) * 1.6)}</b>; S waves cannot cross the liquid core; `)}strongest shaking (surface waves) at <b>${fmtDur(r / V_SURF)}</b>. Intensity <b>${mmi}</b> on the Mercalli scale: ${MMI_SAY[mv]}.`]);
+  sec.push([tr('Seismic waves'), '#ff9a52', (tP !== null ? tr('P waves at <b>{a}</b>, S waves at <b>{b}</b>; ', { a: fmtDur(tP), b: fmtDur(tS) }) : (adeg < 142 ? tr('In the core shadow: no direct P or S waves arrive; ') : tr('P waves refracted through the core arrive at about <b>{t}</b>; S waves cannot cross the liquid core; ', { t: fmtDur(1150 + (adeg - 142) * 1.6) }))) + tr('strongest shaking (surface waves) at <b>{t}</b>. Intensity <b>{i}</b> on the Mercalli scale: {say}.', { t: fmtDur(r / V_SURF), i: mmi, say: tr(MMI_SAY[mv]) })]);
   // re-entry
   if (CPU.rf) {
     const RX = META.reentry; let pk = 0, tp = 0, t1 = -1, dur = 0;
     for (let k = 0; k < RX.n; k++) { const q = reentryAt(lon, lat, (k + 0.5) * RX.dt); if (q > pk) { pk = q; tp = (k + 0.5) * RX.dt; } if (q > 1000 && t1 < 0) t1 = k * RX.dt; if (q > 1361) dur += RX.dt; }
     const c = CPU.rm[clamp(Math.floor(90 - lat), 0, 179) * 360 + clamp(Math.floor(lon + 180), 0, 359)], mm = c ? Math.pow(10, (c - 1) / 254 * 6 - 3) : 0;
-    const thick = mm >= 10 ? `${(mm / 10).toFixed(mm >= 100 ? 0 : 1)} cm` : `${mm.toFixed(mm >= 1 ? 1 : 2)} mm`;
-    sec.push(['Ejecta re-entry', '#ff6a2a', pk > 1000
-      ? `Starts <b>${fmtDur(t1)}</b> after impact and peaks at <b>${fmtDur(tp)}</b>, heating the upper air with <b>${fmtW(pk)}</b> (${sig2(pk / 1361)} times sunlight), above sunlight for about <b>${fmtDur(dur)}</b>. At the ground: up to ${fmtW(pk / 2)} if half of it radiated down unshielded, far less if the falling spherules shielded the surface (around 6 kW/m² at peak in Goldin and Melosh's model). Spherule layer left behind: about <b>${thick}</b>.`
-      : `Little ejecta re-enters here. Spherule layer about <b>${thick}</b>.`]);
+    const thick = mm >= 10 ? `${fix(mm / 10, mm >= 100 ? 0 : 1)} cm` : `${fix(mm, mm >= 1 ? 1 : 2)} mm`;
+    sec.push([tr('Ejecta re-entry'), '#ff6a2a', pk > 1000
+      ? tr("Starts <b>{a}</b> after impact and peaks at <b>{b}</b>, heating the upper air with <b>{w}</b> ({k} times sunlight), above sunlight for about <b>{d}</b>. At the ground: up to {g} if half of it radiated down unshielded, far less if the falling spherules shielded the surface (around 6 kW/m² at peak in Goldin and Melosh's model). Spherule layer left behind: about <b>{th}</b>.", { a: fmtDur(t1), b: fmtDur(tp), w: fmtW(pk), k: sig2(pk / 1361), d: fmtDur(dur), g: fmtW(pk / 2), th: thick })
+      : tr('Little ejecta re-enters here. Spherule layer about <b>{th}</b>.', { th: thick })]);
   }
   // wildfires
   if (CPU.fire) {
     const ci = (clamp(Math.floor(90 - lat), 0, 179) * 360 + clamp(Math.floor(lon + 180), 0, 359)) * 4, f = CPU.fire;
     const when = c => c ? fmtDur((c - 1) * 120) : null;
-    const say = (lit, live) => live ? `live forest catches fire <b>${when(live)}</b> after impact, dry litter <b>${when(lit)}</b>` : lit ? `dry litter catches fire <b>${when(lit)}</b> after impact, in scattered patches; live forest does not (the heat does not last long enough)` : 'nothing catches fire';
+    const say = (lit, live) => live ? tr('live forest catches fire <b>{a}</b> after impact, dry litter <b>{b}</b>', { a: when(live), b: when(lit) }) : lit ? tr('dry litter catches fire <b>{a}</b> after impact, in scattered patches; live forest does not (the heat does not last long enough)', { a: when(lit) }) : tr('nothing catches fire');
     const burnable = land && elev < 3500 && Math.abs(lat) < 75;
-    sec.push(['Wildfires', '#ff5a1f', !land ? 'Open sea: nothing to burn.' : !burnable ? 'Too high or too cold to carry much vegetation.'
-      : `If the falling debris shielded the ground (Patchy): ${say(f[ci], f[ci + 1])}. If it did not (Firestorm): ${say(f[ci + 2], f[ci + 3])}. The evidence is mixed: charcoal in the crater shows nearby land burned within a day, but North American boundary rocks hold less charcoal than usual.`]);
+    sec.push([tr('Wildfires'), '#ff5a1f', !land ? tr('Open sea: nothing to burn.') : !burnable ? tr('Too high or too cold to carry much vegetation.')
+      : tr('If the falling debris shielded the ground (Patchy): {a}. If it did not (Firestorm): {b}. The evidence is mixed: charcoal in the crater shows nearby land burned within a day, but North American boundary rocks hold less charcoal than usual.', { a: say(f[ci], f[ci + 1]), b: say(f[ci + 2], f[ci + 3]) })]);
   }
   // tsunami
-  if (!land && CPU.gT) { const ta = CPU.gT[gi], amax = CPU.gA[gi]; sec.push(['Tsunami', '#e8803a', ta > 0 ? `First waves at <b>${fmtDur(ta)}</b>, highest crest about <b>${amax >= 10 ? Math.round(amax) : amax.toFixed(1)} m</b> in the open sea here.` : 'The simulated tsunami does not reach this water within two days.']); }
-  else sec.push(['Tsunami', '#e8803a', `Land at 66 Ma (${Math.round(elev)} m). The globe run does not flood land; the Gulf view does.`]);
+  if (!land && CPU.gT) { const ta = CPU.gT[gi], amax = CPU.gA[gi]; sec.push([tr('Tsunami'), '#e8803a', ta > 0 ? tr('First waves at <b>{t}</b>, highest crest about <b>{h} m</b> in the open sea here.', { t: fmtDur(ta), h: amax >= 10 ? Math.round(amax) : fix(amax, 1) }) : tr('The simulated tsunami does not reach this water within two days.')]); }
+  else sec.push([tr('Tsunami'), '#e8803a', tr('Land at 66 Ma ({h} m). The globe run does not flood land; the Gulf view does.', { h: Math.round(elev) })]);
   // impact winter at this place, in the selected scenario
   if (CL.data[CL.scen]) {
     const sc = clScen(), isLand = land, T0 = T0sea(lat) - (isLand ? 6.5 * Math.max(elev, 0) / 1000 : 0);
@@ -2932,20 +2956,20 @@ function probeAt(lon, lat, site = null) {
       if (T < tmin) { tmin = T; tAt = CL_T[k]; } if (c[0] < 0.01) dark += dt; lmin = Math.min(lmin, c[0]); if (T < (isLand ? 0 : -1.8)) frz += dt;
     }
     const span = x => fmtLong(x).replace(/^1 (\w+)s$/, '1 $1');
-    const dk = dark >= 86400 ? `sunlight under 1% of normal for <b>${span(dark)}</b>` : `sunlight down to <b>${Math.round(lmin * 100)}%</b> of normal at its lowest`;
-    const fz = frz < 86400 ? (isLand ? 'never below freezing' : 'no sea ice') : `${isLand ? 'below freezing' : 'sea ice'} for <b>${span(frz)}</b>`;
-    sec.push(['Impact winter', '#8fb0c8', `In the ${sc.name.toLowerCase()} scenario: ${dk}. At its worst <b>${Math.round(T0 - tmin)} °C colder</b> than normal for the time of year (the normal annual mean here is ${Math.round(T0)} °C), some <b>${fmtLong(tAt)}</b> after impact; ${fz}. Then, over 100,000 years, about <b>${(5 * (1 + 0.6 * Math.sin(deg(lat)) ** 2) / (1 + 0.6 * Math.sin(deg(25)) ** 2) * (isLand ? 1.2 : 1)).toFixed(0)} °C</b> warmer than before the impact (scaled from the El Kef record).`]);
+    const dk = dark >= 86400 ? tr('sunlight under 1% of normal for <b>{t}</b>', { t: span(dark) }) : tr('sunlight down to <b>{n}%</b> of normal at its lowest', { n: Math.round(lmin * 100) });
+    const fz = frz < 86400 ? tr(isLand ? 'never below freezing' : 'no sea ice') : tr(isLand ? 'below freezing for <b>{t}</b>' : 'sea ice for <b>{t}</b>', { t: span(frz) });
+    sec.push([tr('Impact winter'), '#8fb0c8', tr('In the {name} scenario: {dk}. At its worst <b>{c} °C colder</b> than normal for the time of year (the normal annual mean here is {n} °C), some <b>{t}</b> after impact; {fz}. Then, over 100,000 years, about <b>{w} °C</b> warmer than before the impact (scaled from the El Kef record).', { name: tr(sc.name).toLowerCase(), dk, c: Math.round(T0 - tmin), n: Math.round(T0), t: fmtLong(tAt), fz, w: (5 * (1 + 0.6 * Math.sin(deg(lat)) ** 2) / (1 + 0.6 * Math.sin(deg(25)) ** 2) * (isLand ? 1.2 : 1)).toFixed(0) })]);
   }
-  const ll = (a, b) => `${Math.abs(b).toFixed(1)}° ${b >= 0 ? 'N' : 'S'} ${Math.abs(a).toFixed(1)}° ${a >= 0 ? 'E' : 'W'}`;
+  const ll = (a, b) => `${ns(b, 1)} ${ew(a, 1)}`;
   let rec = '';
   if (site) {          // what the rocks there show, then what the models give for the same place
-    const mapSays = site.map_h > 0 ? `land about ${Math.round(site.map_h)} m high` : `sea about ${Math.round(-site.map_h)} m deep`;
-    const agree = (site.map_h > 0) === (site.env === 'land') ? '' : ` The 66 Ma map shows ${mapSays} here, while the rocks were laid down ${site.env === 'land' ? 'on land' : 'in the sea'}: the map's coastlines are approximate at this scale.`;
-    rec = `<h3><i style="--k:var(--fossil)"></i>${site.kind === 'fossil' ? 'The fossil record' : 'The boundary layer'}</h3><p>${site.record}</p><p class="note">${site.refs}.${agree}</p><h3 class="sub">What the models give here</h3>`;
+    const mapSays = tr(site.map_h > 0 ? 'land about {h} m high' : 'sea about {h} m deep', { h: Math.round(Math.abs(site.map_h)) });
+    const agree = (site.map_h > 0) === (site.env === 'land') ? '' : tr(" The 66 Ma map shows {m} here, while the rocks were laid down {w}: the map's coastlines are approximate at this scale.", { m: mapSays, w: tr(site.env === 'land' ? 'on land' : 'in the sea') });
+    rec = `<h3><i style="--k:var(--fossil)"></i>${tr(site.kind === 'fossil' ? 'The fossil record' : 'The boundary layer')}</h3><p>${site.record}</p><p class="note">${site.refs}.${agree}</p><h3 class="sub">${tr('What the models give here')}</h3>`;
   }
-  $('probe').querySelector('h2').textContent = site ? site.name : 'What reached this place';
-  $('probeBody').innerHTML = `<p class="where">${site ? `${site.place} · ` : ''}${ll(lon, lat)} (66 Ma) · ${Math.round(rkm).toLocaleString('en')} km from the impact</p>` + rec +
-    sec.map(([h, c, t]) => `<h3><i style="--k:${c}"></i>${h}</h3><p>${t}</p>`).join('') + `<p class="note">For the whole event, from the models described under Sources and method. ${site ? `Today at ${ll(site.lon, site.lat)}, moved to 66 Ma with the PALEOMAP plate model. ` : ''}Click elsewhere on the globe to compare.</p>`;
+  $('probe').querySelector('h2').textContent = site ? site.name : tr('What reached this place');
+  $('probeBody').innerHTML = `<p class="where">${site ? `${site.place} · ` : ''}${ll(lon, lat)} (66 Ma) · ${tr('{km} km from the impact', { km: grp(Math.round(rkm)) })}</p>` + rec +
+    sec.map(([h, c, t]) => `<h3><i style="--k:${c}"></i>${h}</h3><p>${t}</p>`).join('') + `<p class="note">${tr('For the whole event, from the models described under Sources and method. ')}${site ? tr('Today at {p}, moved to 66 Ma with the PALEOMAP plate model. ', { p: ll(site.lon, site.lat) }) : ''}${tr('Click elsewhere on the globe to compare.')}</p>`;
   $('probe').hidden = false;
 }
 let probeTimer = 0;
@@ -3004,15 +3028,15 @@ function clAt(lon, lat, t, id = CL.scen) {
   return [Math.pow(10, a * mix(Math.log10(A[0]), Math.log10(B[0]), w)), a * mix(A[1], B[1], w), a * mix(A[2], B[2], w)];
 }
 function setScen(id) {
-  if (id === 'soot' && CL.scen !== 'soot' && U.uFire.value.x === 1 && CL.ready) { setFires(2); const h = $('modeHint'); h.textContent = 'The soot scenario assumes forests burned worldwide: wildfires set to Firestorm'; h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
+  if (id === 'soot' && CL.scen !== 'soot' && U.uFire.value.x === 1 && CL.ready) { setFires(2); const h = $('modeHint'); h.textContent = tr('The soot scenario assumes forests burned worldwide: wildfires set to Firestorm'); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
   CL.scen = id; pref('scen', id);
   if (CL.tex[id]) GU.tCL.value = CL.tex[id];
   GU.uHaze.value.setRGB(...HAZE[id][0]); $('haze').style.background = `linear-gradient(${HAZE[id][1]}, ${HAZE[id][1]} 55%, transparent 130%)`;
   for (const b of $('clScen').children) b.setAttribute('aria-pressed', String(b.dataset.id === id));
-  const sc = clScen(); $('clRef').textContent = `${sc.ref}. Published: ${sc.paper.replace(/degC/g, '°C')}.`;
+  const sc = clScen(); $('clRef').textContent = `${sc.ref}. ${tr('Published')}: ${tr(sc.paper).replace(/degC/g, '°C')}.`;
   drawChart(); if (probeState.on) probeAt(probeState.lon, probeState.lat, probeState.site);
 }
-$('clScen').innerHTML = CLM.scenarios.map(sc => `<button type="button" data-id="${sc.id}" aria-pressed="false" title="${sc.ref}">${{ dust: 'Dust', soot: 'Soot', sulfate: 'Sulfate' }[sc.id] || sc.name}</button>`).join('');
+$('clScen').innerHTML = CLM.scenarios.map(sc => `<button type="button" data-id="${sc.id}" aria-pressed="false" title="${sc.ref}">${tr({ dust: 'Dust', soot: 'Soot', sulfate: 'Sulfate' }[sc.id] || sc.name)}</button>`).join('');
 for (const b of $('clScen').children) b.addEventListener('click', () => setScen(b.dataset.id));
 bindSwitch('tTemp', 'tempmap', false, on => { GU.uCLv.value.x = on ? 1 : 0; $('clScale').hidden = !on; });
 // the chart: temperature change from one day to 100,000 years, on a log time axis
@@ -3024,9 +3048,9 @@ function drawChart() {
   let dark = '', k0 = -1;
   sc.dark.forEach((v, k) => { if (v > 0.5 && k0 < 0) k0 = k; if ((v <= 0.5 || k === CL_N - 1) && k0 >= 0) { dark += `<rect class="dark" x="${chX(CL_T[k0])}" y="${CH.t}" width="${chX(CL_T[k]) - chX(CL_T[k0])}" height="${CH.h - CH.t - CH.b}"/>`; k0 = -1; } });
   const gy = [-40, -20, 0, 10].map(v => `<line class="ax" x1="${CH.l}" x2="${CH.w - CH.r}" y1="${chY(v)}" y2="${chY(v)}"/><text x="${CH.l - 3}" y="${chY(v) + 3}" text-anchor="end">${v > 0 ? '+' + v : v}</text>`).join('');
-  const gx = [[86400, '1 d'], [30 * 86400, '1 mo'], [YEAR, '1 yr'], [10 * YEAR, '10 yr'], [100 * YEAR, '100'], [1e4 * YEAR, '10 kyr']].map(([t, l]) => `<text x="${chX(t)}" y="${CH.h - 4}" text-anchor="middle">${l}</text>`).join('');
+  const gx = [[86400, '1 d'], [30 * 86400, '1 mo'], [YEAR, '1 yr'], [10 * YEAR, '10 yr'], [100 * YEAR, '100'], [1e4 * YEAR, '10 kyr']].map(([t, l]) => `<text x="${chX(t)}" y="${CH.h - 4}" text-anchor="middle">${tr(l)}</text>`).join('');
   $('clChart').innerHTML = dark + gy + gx + `<path class="l" d="${line(sc.land)}"/><path class="o" d="${line(sc.sea)}"/><path class="g" d="${line(sc.global)}"/><line class="cur" id="clCur" y1="${CH.t}" y2="${CH.h - CH.b}"/>`;
-  $('clNote').textContent = 'Departures from the normal for the time of year (seasons from mid boreal spring), annual means after ~2 years. Each scenario reproduces one published study (see Sources and method); the last stretch is the warming recorded at El Kef.';
+  $('clNote').textContent = tr('Departures from the normal for the time of year (seasons from mid boreal spring), annual means after ~2 years. Each scenario reproduces one published study (see Sources and method); the last stretch is the warming recorded at El Kef.');
 }
 let clTxt = 0;
 function updateClimate() {
@@ -3039,8 +3063,8 @@ function updateClimate() {
   // global values for the card, from the chart series
   const sc = clScen(), at = arr => a * mix(arr[k0], arr[k1], w);
   const g = at(sc.global), base = sc.abs[0], li = Math.pow(10, a * mix(Math.log10(Math.max(sc.light[k0], 1e-6)), Math.log10(Math.max(sc.light[k1], 1e-6)), w));
-  $('clT').textContent = `${g >= 0 ? '+' : '−'}${Math.abs(g).toFixed(1)} °C`; $('clTs').textContent = `global mean, now ${(base + g).toFixed(0)} °C (was ${base.toFixed(0)} °C)`;
-  $('clL').textContent = li >= 0.995 ? 'normal' : li >= 0.1 ? `${Math.round(li * 100)}%` : li >= 0.001 ? `${Number((li * 100).toPrecision(2))}%` : 'under 0.1%';
+  $('clT').textContent = `${g >= 0 ? '+' : '−'}${fix(Math.abs(g), 1)} °C`; $('clTs').textContent = tr('global mean, now {a} °C (was {b} °C)', { a: (base + g).toFixed(0), b: base.toFixed(0) });
+  $('clL').textContent = li >= 0.995 ? tr('normal') : li >= 0.1 ? `${Math.round(li * 100)}%` : li >= 0.001 ? `${dec(Number((li * 100).toPrecision(2)))}%` : tr('under 0.1%');
   const cur = $('clCur'); if (cur) { const x = chX(Math.max(t, 86400)); cur.setAttribute('x1', x); cur.setAttribute('x2', x); }
 }
 stageEl.append($('skyglow'), $('haze'));
@@ -3177,14 +3201,14 @@ let globeMode = false;
 function setGlobeMode(on) {
   if (on === globeMode) return;
   globeMode = on; document.body.classList.toggle('globe-mode', on); $('globeBtn').setAttribute('aria-pressed', String(on));
-  $('place').textContent = on ? 'Chicxulub · the Earth 66 million years ago' : 'Chicxulub · Yucatán shelf';
-  if (on) { const h = $('modeHint'); h.textContent = 'Click anywhere on the globe to see what reached it, and when · double-click to fly back to the crater'; h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
+  $('place').textContent = tr(on ? 'Chicxulub · the Earth 66 million years ago' : 'Chicxulub · Yucatán shelf');
+  if (on) { const h = $('modeHint'); h.textContent = tr('Click anywhere on the globe to see what reached it, and when · double-click to fly back to the crater'); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
 }
 function globeView() { const k = far(); return [EC.clone().add(toV(-60, 14).applyMatrix4(GM_ROT).multiplyScalar(RE_M * 3.4 * k)), EC.clone()]; }   // the Atlantic hemisphere
 async function enterGlobe(instant, centre) {          // centre [lon, lat]: look down on it (else the Atlantic hemisphere); north up
   closePops(); tour = null; if (camMode !== 'orbit') setMode('orbit', true);
-  if (!globeReady) { $('loadMsg').textContent = 'Loading the globe'; $('loadBar').style.width = '60%'; $('loading').classList.remove('done'); }
-  try { await ensureGlobe(); } catch (err) { $('loadMsg').textContent = 'Could not load the globe. Reload the page to try again.'; throw err; }
+  if (!globeReady) { $('loadMsg').textContent = tr('Loading the globe'); $('loadBar').style.width = '60%'; $('loading').classList.remove('done'); }
+  try { await ensureGlobe(); } catch (err) { $('loadMsg').textContent = tr('Could not load the globe. Reload the page to try again.'); throw err; }
   $('loading').classList.add('done');
   const [p, t] = centre ? [EC.clone().add(toV(centre[0], centre[1]).applyMatrix4(GM_ROT).multiplyScalar(RE_M * 3.4 * far())), EC.clone()] : globeView();
   const up = toV(0, 90).applyMatrix4(GM_ROT);         // north up, however the view was rolled before

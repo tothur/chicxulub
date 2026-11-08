@@ -338,3 +338,8 @@ v35 (2026-11-08): navigation bug fixes.
 - Keyboard moves work anywhere on the Earth (they had been undone by the pivot each frame). North up keeps the same place
   in view on the globe. The relief switch leaves the camera alone far from the crater. Views arrive level. Leaving Fly
   mode keeps the view, and choosing Fly on the globe goes to the crater first. Grabbing works from below the ground.
+
+v36 (2026-11-08): Hungarian.
+- sim/hu.js maps the viewer's English text to Hungarian (long texts by their first 60 characters); site records and names
+  are in it too, so sites.py and meta.json stay English. Values in generated text go through tr() with named placeholders;
+  the {x|val} and {x|ig} filters add Hungarian case endings to times. The 2D map keeps its smaller dictionary inline.

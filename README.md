@@ -14,6 +14,9 @@ Interactive reconstructions of the Chicxulub impact, 66 million years ago, in th
 
 The viewer's About panel lists the models, their limits and the sources.
 
+Both pages are in English and Hungarian: Options > Language in the viewer, the language link on the map, or `?lang=hu` in the
+address. The viewer's Hungarian is in `sim/hu.js`, keyed by the English text.
+
 ## Rebuilding the data
 
 ```sh
