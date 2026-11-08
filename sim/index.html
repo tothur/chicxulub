@@ -2166,6 +2166,7 @@ function groundAt(x, z) {
 }
 const raycaster = new THREE.Raycaster(), _ndc = new THREE.Vector2();
 function pickTerrain(clientX, clientY) {
+  camera.updateMatrixWorld();
   const r = renderer.domElement.getBoundingClientRect();
   _ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(_ndc, camera);
@@ -2205,6 +2206,7 @@ controls.addEventListener('start', () => { fly = null; tour = null; });
 const grab = { on: false, id: -1, at: new THREE.Vector3(), r: RE_M, pts: new Set() };
 const _gq = new THREE.Quaternion(), _ga = new THREE.Vector3(), _gb = new THREE.Vector3(), _gr = new THREE.Raycaster(), _gn = new THREE.Vector2();
 function hitEarth(clientX, clientY, r) {              // where the ray under the cursor meets a sphere of radius r about the centre
+  camera.updateMatrixWorld();                         // several moves can arrive between two frames, and each has already moved the camera
   const rc = renderer.domElement.getBoundingClientRect();
   _gn.set(((clientX - rc.left) / rc.width) * 2 - 1, -((clientY - rc.top) / rc.height) * 2 + 1); _gr.setFromCamera(_gn, camera);
   const o = _gr.ray.origin.clone().sub(EC), d = _gr.ray.direction, b = o.dot(d), c = o.lengthSq() - r * r, disc = b * b - c;
@@ -2237,7 +2239,6 @@ function anchorZoom(x, y, until) {
 function holdZoomPoint() {
   if (!zoomAt.on) return;
   if (performance.now() > zoomAt.until) { zoomAt.on = false; return; }
-  camera.updateMatrixWorld();
   const h = hitEarth(zoomAt.x, zoomAt.y, zoomAt.r); if (h) carryEarth(h, zoomAt.at);
 }
 renderer.domElement.addEventListener('wheel', e => anchorZoom(e.clientX, e.clientY, performance.now() + 250), { capture: true, passive: true });
