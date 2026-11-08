@@ -2127,7 +2127,8 @@ addEventListener('keydown', e => {
 });
 const exBtns = { ex1: 1, ex3: 3, ex6: 6 };
 for (const [id, v] of Object.entries(exBtns)) $(id).addEventListener('click', () => {
-  controls.target.y *= v / exag; camera.position.y *= v / exag; exag = v; U.uExag.value = v;
+  if (farK() < 0.01) for (const p of [controls.target, camera.position, S0]) { const f = unbendV(p); bendV(f.x, f.y * v / exag, f.z, p); }      // heights on the flat map, not across the Earth's curve
+  exag = v; U.uExag.value = v;
   for (const k of Object.keys(exBtns)) $(k).setAttribute('aria-pressed', String(k === id));
 });
 for (const [id, m] of [['cutOff', 'off'], ['cutNS', 'ns'], ['cutTr', 'tr']]) $(id).addEventListener('click', () => setCut(m));
@@ -2163,7 +2164,7 @@ function pickAlong(o, d) {
 
 let fly = null, camMode = 'orbit', yaw = 0, pitch = 0, fpSpeedMul = 1, lookDrag = false, lastX = 0, lastY = 0, pointerPan = false, panning = false;
 const keys = new Set(), fpVel = new THREE.Vector3();
-controls.zoomToCursor = true; controls.screenSpacePanning = false; controls.dampingFactor = 0.08;
+controls.zoomToCursor = false; controls.screenSpacePanning = false; controls.dampingFactor = 0.08;
 // like a map: drag grabs and moves it (handled below, not by the orbit controls), right-drag (or Shift/Ctrl-drag) turns
 // and tilts it; one finger moves, two turn and zoom
 controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: -1 };      // turning is handled below too: about the local vertical
@@ -2184,11 +2185,41 @@ function hitEarth(clientX, clientY, r) {              // where the ray under the
   _gn.set(((clientX - rc.left) / rc.width) * 2 - 1, -((clientY - rc.top) / rc.height) * 2 + 1); _gr.setFromCamera(_gn, camera);
   const o = _gr.ray.origin.clone().sub(EC), d = _gr.ray.direction, b = o.dot(d), c = o.lengthSq() - r * r, disc = b * b - c;
   if (disc < 0) return null;
-  const t = -b - Math.sqrt(disc); if (t < 0) return null;
+  const sq = Math.sqrt(disc), t = -b - sq >= 0 ? -b - sq : -b + sq; if (t < 0) return null;          // from inside the sphere: where the ray leaves it
   return _gr.ray.origin.clone().addScaledVector(d, t);
 }
+function carryEarth(from, to) {                       // turn the camera, its pivot and the ground pivot about the centre, so that what is at `from` goes to `to`
+  _ga.copy(from).sub(EC).normalize(); _gb.copy(to).sub(EC).normalize();
+  if (_ga.distanceToSquared(_gb) < 1e-16) return;
+  _gq.setFromUnitVectors(_ga, _gb); spinEarth(_gq);
+}
+function spinEarth(q) {
+  for (const v of [camera.position, controls.target, S0]) v.sub(EC).applyQuaternion(q).add(EC);
+  camera.quaternion.premultiply(q); camera.up.applyQuaternion(q);          // the view keeps its roll and tilt
+}
+// Zooming toward the cursor: the controls move the camera along the line of sight, and the Earth is then carried, as in a
+// grab, so that the point under the cursor stays there. Moving the camera sideways and re-aiming it would swing the view.
+const zoomAt = { on: false, x: 0, y: 0, at: new THREE.Vector3(), r: RE_M, until: 0 };
+function anchorZoom(x, y, until) {
+  if (camMode !== 'orbit' || farK() >= 0.02) { zoomAt.on = false; return; }
+  const now = performance.now();
+  if (zoomAt.on && now < zoomAt.until && Math.hypot(x - zoomAt.x, y - zoomAt.y) < 3) { zoomAt.until = until; return; }
+  zoomAt.on = false;
+  const hit = farK() < 0.01 ? pickTerrain(x, y) : null, h = hit || hitEarth(x, y, RE_M); if (!h) return;
+  _ga.copy(h).sub(camera.position).normalize(); _gb.copy(h).sub(EC).normalize();
+  if (-_ga.dot(_gb) < 0.12) return;                                        // at the horizon a small change of height would throw the view far away
+  Object.assign(zoomAt, { on: true, x, y, r: h.distanceTo(EC), until }); zoomAt.at.copy(h);
+}
+function holdZoomPoint() {
+  if (!zoomAt.on) return;
+  if (performance.now() > zoomAt.until) { zoomAt.on = false; return; }
+  camera.updateMatrixWorld();
+  const h = hitEarth(zoomAt.x, zoomAt.y, zoomAt.r); if (h) carryEarth(h, zoomAt.at);
+}
+renderer.domElement.addEventListener('wheel', e => anchorZoom(e.clientX, e.clientY, performance.now() + 250), { capture: true, passive: true });
 renderer.domElement.addEventListener('pointerdown', e => {
-  grab.pts.add(e.pointerId);
+  grab.pts.add(e.pointerId); zoomAt.on = false;
+  if (e.button === 1) { anchorZoom(e.clientX, e.clientY, Infinity); return; }   // middle-drag zooms too
   if (grab.pts.size > 1) { grab.on = false; return; }                    // two fingers: the orbit controls turn and zoom
   if (camMode !== 'orbit' || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
   const near = farK() < 0.01, hit = near ? pickTerrain(e.clientX, e.clientY) : null;
@@ -2199,11 +2230,7 @@ renderer.domElement.addEventListener('pointerdown', e => {
 addEventListener('pointermove', e => {
   if (!grab.on || e.pointerId !== grab.id) return;
   const h = hitEarth(e.clientX, e.clientY, grab.r); if (!h) return;
-  _ga.copy(grab.at).sub(EC).normalize(); _gb.copy(h).sub(EC).normalize();
-  if (_ga.distanceToSquared(_gb) < 1e-16) return;
-  _gq.setFromUnitVectors(_gb, _ga);                                       // turn what is now under the cursor back to the grabbed point
-  for (const v of [camera.position, controls.target, S0]) v.sub(EC).applyQuaternion(_gq).add(EC);
-  camera.quaternion.premultiply(_gq); camera.up.applyQuaternion(_gq);      // the view keeps its roll: no drift of the grabbed point
+  carryEarth(h, grab.at);                                                 // turn what is now under the cursor back to the grabbed point
 });
 // Turning and tilting: about the local vertical at the pivot near the ground; far out, about the line of sight
 const turn = { on: false, id: -1, x: 0, y: 0 }, touchPts = new Map();
@@ -2215,7 +2242,10 @@ function rotateView(dAz, dTilt) {
   if (!far && dTilt) {
     const phi = off.angleTo(L), nearBlock = Math.hypot(t.x, t.z) < 400e3;      // below the horizon only around the block (its underside)
     const phi1 = clamp(phi + dTilt, 0.02, nearBlock ? 2.2 : 1.5);
-    const ax = _tc.crossVectors(L, off); if (ax.lengthSq() > 1e-12) { ax.normalize(); off.applyAxisAngle(ax, phi1 - phi); }
+    if (phi < 0.03) {                                                         // straight down there is no direction to tilt along yet: tilt toward the bottom of the screen, keeping the heading
+      _tc.set(0, 1, 0).applyQuaternion(camera.quaternion).addScaledVector(L, -_tc.dot(L));
+      if (_tc.lengthSq() > 1e-12) { const d = off.length(); off.copy(L).multiplyScalar(Math.cos(phi1)).addScaledVector(_tc.normalize(), -Math.sin(phi1)).setLength(d); }
+    } else { const ax = _tc.crossVectors(L, off); if (ax.lengthSq() > 1e-12) { ax.normalize(); off.applyAxisAngle(ax, phi1 - phi); } }
     camera.up.copy(L);
   }
   camera.position.copy(t).add(off); camera.lookAt(t); fly = null; tour = null;
@@ -2243,14 +2273,15 @@ addEventListener('pointermove', e => {
 });
 const endTurn = e => { touchPts.delete(e.pointerId); if (e.pointerId === turn.id) turn.on = false; };
 addEventListener('pointerup', endTurn); addEventListener('pointercancel', endTurn);
-const endGrab = e => { grab.pts.delete(e.pointerId); if (e.pointerId === grab.id) grab.on = false; };
+const endGrab = e => { grab.pts.delete(e.pointerId); if (e.pointerId === grab.id) grab.on = false; if (zoomAt.until === Infinity) zoomAt.on = false; };
 addEventListener('pointerup', endGrab); addEventListener('pointercancel', endGrab);
 function setMode(m, quiet) {
   if (m === camMode) return;
+  if (m === 'fly' && (farK() > 0 || Math.max(Math.abs(camera.position.x), Math.abs(camera.position.z)) > HALF * 4)) { VIEWS.overview(); fly.then = () => setMode('fly'); return; }   // flying is over the regional map: go there first
   const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
   if (m === 'orbit') {
     if (document.pointerLockElement) document.exitPointerLock();
-    if (!quiet) { const tgt = pickAlong(camera.position, dir) || camera.position.clone().addScaledVector(dir, 50000); controls.target.copy(tgt); }
+    if (!quiet) { const tgt = pickAlong(camera.position, dir) || camera.position.clone().addScaledVector(dir, 50000); controls.target.copy(tgt); S0.copy(tgt); }
     controls.enabled = true;
   } else {
     fly = null; controls.enabled = false; fpVel.set(0, 0, 0);
@@ -2309,21 +2340,26 @@ const down = (...c) => c.some(k => keys.has(k));
 
 function northUp() {
   if (camMode !== 'orbit') { yaw = 0; return; }
-  const off = camera.position.clone().sub(controls.target), sph = new THREE.Spherical().setFromVector3(off);
-  sph.theta = 0; off.setFromSpherical(sph);
-  flyTo(controls.target.clone().add(off), controls.target.clone(), 0.9);
+  const p = camera.position.clone(), t = controls.target.clone();
+  if (farK() > 0.5) { flyTo(p, t, 0.9, toV(0, 90).applyMatrix4(GM_ROT)); return; }     // far out: only the roll changes, the same part of the Earth stays in view
+  const L = S0.clone().sub(EC).normalize(), n = new THREE.Vector3(0, 0, -1).addScaledVector(L, L.z).normalize();       // the regional map's north, as on the compass
+  const off = p.clone().sub(t), h = off.clone().addScaledVector(L, -off.dot(L));
+  if (h.length() < off.length() * 0.03) { flyTo(p, t, 0.9, n); return; }                 // looking straight down: only the roll
+  const a = Math.atan2(new THREE.Vector3().crossVectors(h, n.clone().negate()).dot(L), h.dot(n.clone().negate()));
+  flyTo(p.clone().sub(t).applyAxisAngle(L, a).add(t), t, 0.9, L); fly.arc = { L, a };
 }
-const _off = new THREE.Vector3(), _sph = new THREE.Spherical(), _fwd = new THREE.Vector3(), _rt = new THREE.Vector3();
+const _off = new THREE.Vector3(), _sph = new THREE.Spherical(), _fwd = new THREE.Vector3(), _rt = new THREE.Vector3(), _lv = new THREE.Vector3(), _tv = new THREE.Vector3(), _tq2 = new THREE.Quaternion();
 function orbitKeys(dt) {
   const fast = down('ShiftLeft', 'ShiftRight') ? 3 : 1;
   _off.copy(camera.position).sub(controls.target);
   const dist = _off.length();
   const mz = (down('KeyW', 'ArrowUp') ? 1 : 0) - (down('KeyS', 'ArrowDown') ? 1 : 0), mx = (down('KeyD', 'ArrowRight') ? 1 : 0) - (down('KeyA', 'ArrowLeft') ? 1 : 0);
   if (mx || mz) {
-    _fwd.set(-_off.x, 0, -_off.z).normalize(); _rt.set(-_fwd.z, 0, _fwd.x);
-    const sp = Math.max(dist, 50) * 0.45 * fast * dt;
-    const dx = (_fwd.x * mz + _rt.x * mx) * sp, dz = (_fwd.z * mz + _rt.z * mx) * sp;
-    controls.target.x += dx; controls.target.z += dz; camera.position.x += dx; camera.position.z += dz; fly = null;
+    const L = _lv.copy(S0).sub(EC).normalize();
+    _fwd.set(0, 1, 0).applyQuaternion(camera.quaternion).add(_tv.set(0, 0, -1).applyQuaternion(camera.quaternion));
+    _fwd.addScaledVector(L, -_fwd.dot(L)).normalize(); _rt.crossVectors(_fwd, L);             // forward along the ground, whichever way the view looks
+    _tv.copy(_fwd).multiplyScalar(mz).addScaledVector(_rt, mx).normalize();
+    _tq2.setFromAxisAngle(_ax.crossVectors(L, _tv).normalize(), Math.max(Math.min(dist, RE_M), 50) * 0.45 * fast * dt / RE_M); spinEarth(_tq2); fly = null; zoomAt.on = false;
   }
   const rot = (down('KeyE') ? 1 : 0) - (down('KeyQ') ? 1 : 0), tilt = (down('KeyR') ? 1 : 0) - (down('KeyF') ? 1 : 0);
   const zoom = (down('KeyZ', 'Equal', 'NumpadAdd') ? 1 : 0) - (down('KeyX', 'Minus', 'NumpadSubtract') ? 1 : 0);
@@ -2356,23 +2392,33 @@ function updateCamera(dt) {
   let ground;
   if (camMode === 'orbit') {
     orbitKeys(dt);
+    // an up along the line of sight no longer fixes the roll and the view would spin: hand it the roll the view has now
+    if (Math.abs(_cv.copy(controls.target).sub(camera.position).normalize().dot(camera.up)) > 0.97) camera.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
     if (fly) {
       fly.t += dt / fly.dur; const e = smooth(0, 1, fly.t);
-      camera.position.lerpVectors(fly.p0, fly.p1, e); camera.position.y += Math.sin(Math.PI * e) * fly.hump;
+      camera.position.lerpVectors(fly.p0, fly.p1, e);
+      if (fly.arc) camera.position.copy(fly.p0).sub(fly.t0).applyAxisAngle(fly.arc.L, e * fly.arc.a).add(fly.t0);       // a turn about the pivot, not a straight line through it
+      else camera.position.addScaledVector(_ax.copy(camera.position).sub(EC).normalize(), Math.sin(Math.PI * e) * fly.hump);
       controls.target.lerpVectors(fly.t0, fly.t1, e);
-      if (fly.u1) { camera.up.lerpVectors(fly.u0, fly.u1, e); if (camera.up.lengthSq() < 1e-6) camera.up.copy(fly.u1); camera.up.normalize(); }
-      if (fly.t >= 1) { if (fly.t1.distanceTo(EC) > RE_M * 0.5) S0.copy(fly.t1); fly = null; }
+      if (fly.u1) {
+        _ax.lerpVectors(fly.u0, fly.u1, e); if (_ax.lengthSq() < 1e-6) _ax.copy(fly.u1); _ax.normalize();
+        if (Math.abs(_ax.dot(_cv.copy(controls.target).sub(camera.position).normalize())) < 0.97) camera.up.copy(_ax);
+      }
+      const done = fly.t >= 1 && fly;
+      if (done) { if (done.t1.distanceTo(EC) > RE_M * 0.5) S0.copy(done.t1); fly = null; }
       controls.update();
+      if (done && done.then) done.then();
     } else {
       // far out, the pivot sinks to the Earth's centre so the whole globe turns; meanwhile the ground pivot follows the
       // point straight below the camera, so zooming back in goes down onto what is in view, without turning the globe
       const s = tour ? 0 : farK();
       if (!tour && s > 0) S0.lerp(_cv.copy(camera.position).sub(EC).setLength(RE_M).add(EC), Math.min(1, s * 4));
       if (!tour) controls.target.copy(S0).lerp(EC, s);
-      controls.maxPolarAngle = Math.PI - 1e-3; controls.enablePan = false; controls.zoomToCursor = s < 0.02;
+      controls.maxPolarAngle = Math.PI - 1e-3; controls.enablePan = false;
 
       controls.update();
       if (!tour && s < 0.5) S0.copy(controls.target).addScaledVector(EC, -s).multiplyScalar(1 / (1 - s));
+      holdZoomPoint();
       // the view re-levels gently toward the local vertical at the pivot: not while grabbing (the grabbed point stays put),
       // not far out, and not when looking nearly straight down (there the vertical gives no sense of up)
       if (!grab.on) {
@@ -2398,7 +2444,7 @@ function updateCamera(dt) {
 }
 
 // compass, position readout, views, help
-const _dir = new THREE.Vector3();
+const _dir = new THREE.Vector3(), _dirF = new THREE.Vector3(), _dirR = new THREE.Vector3(), POLE = toV(0, 90).applyMatrix4(GM_ROT);
 let infoT = 0;
 const RE = (() => { const a = 6378.137, e2 = 0.00669438, sp = Math.sin(META.map.lat0 * Math.PI / 180), w = 1 - e2 * sp * sp; return Math.sqrt(a / Math.sqrt(w) * a * (1 - e2) / Math.pow(w, 1.5)); })();
 function latLon(x, z) {                       // inverse azimuthal equidistant, as on the regional map
@@ -2409,8 +2455,11 @@ function latLon(x, z) {                       // inverse azimuthal equidistant, 
   return [lat * 180 / Math.PI, lon * 180 / Math.PI];
 }
 function updateNavUI(dt) {
-  camera.getWorldDirection(_dir);
-  const bearing = globeMode ? 0 : Math.atan2(_dir.x, -_dir.z) * 180 / Math.PI;
+  // the way the top of the screen faces: looking down, the line of sight alone has no bearing
+  _dir.set(0, 1, 0).applyQuaternion(camera.quaternion); _dirF.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  let bearing;
+  if (globeMode) bearing = -Math.atan2(POLE.dot(_dirR.crossVectors(_dirF, _dir)), POLE.dot(_dir)) * 180 / Math.PI;
+  else bearing = Math.atan2(_dir.x + _dirF.x, -_dir.z - _dirF.z) * 180 / Math.PI;
   $('needle').setAttribute('transform', `rotate(${-bearing} 20 20)`);
   if ((infoT += dt) < 0.15) return; infoT = 0;
   if (globeMode) { const [lo, la] = llOfWorld(camera.position); $('camInfo').textContent = `The Earth 66 million years ago · seen from ${Math.round(altitude() / 1000).toLocaleString('en')} km\nabove ${Math.abs(la).toFixed(0)}° ${la >= 0 ? 'N' : 'S'} ${Math.abs(lo).toFixed(0)}° ${lo >= 0 ? 'E' : 'W'} (66 Ma coordinates)`; return; }
@@ -2437,7 +2486,7 @@ const HB = () => BOTTOM * exag;
 // views look at the cut face when there is one: n points out of the face, t runs along it
 function faceFrame() { const n = CUTS[cutMode] || [Math.SQRT1_2, Math.SQRT1_2]; return { n, t: [-n[1], n[0]] }; }
 const far = () => camera.aspect < 1 ? 1 / Math.pow(camera.aspect, 0.8) : 1;     // portrait screens need more distance
-const flyF = (p, t, dur) => flyTo(bendA(p), bendA(t), dur);       // views are given on the flat map
+const flyF = (p, t, dur) => { const b = bendA(t); flyTo(bendA(p), b, dur, b.clone().sub(EC).normalize()); };       // views are given on the flat map; they arrive level, with nothing left to turn
 const VIEWS = {
   target: () => { const { n, t } = faceFrame(), k = far(); flyF(V3(k * (n[0] * 165e3 + t[0] * 125e3), k * 52e3 + exag * 4000, k * (n[1] * 165e3 + t[1] * 125e3)), V3(-n[0] * 25e3 - t[0] * 15e3, -exag * 5500, -n[1] * 25e3 - t[1] * 15e3)); },
   overview: () => { const { n, t } = faceFrame(), k = far(); flyF(V3(k * (n[0] * 420e3 + t[0] * 260e3), HB() * 0.3 + k * 230e3, k * (n[1] * 420e3 + t[1] * 260e3)), V3(-n[0] * 40e3, -HB() * 0.38, -n[1] * 40e3)); },

@@ -328,3 +328,13 @@ v33 (2026-10-27): fossil sites and K-Pg boundary sections.
 - Viewer: site labels (diamonds = boundary sections, circles = fossil sites) on the globe and close up; click one for
   its record above the probe's model results for the same place. Options > Fossil sites and boundary rocks; Views >
   Fossil sites and boundary rocks.
+
+v35 (2026-11-08): navigation bug fixes.
+- Zooming toward the cursor no longer uses the orbit controls' cursor zoom, which moved the camera sideways and re-aimed
+  it, so the view swung round and could spin. The camera now moves along the line of sight and the Earth is carried, as
+  in a grab, so the point under the cursor stays there with tilt and roll unchanged.
+- The view's up can no longer lie along the line of sight, where it stops fixing the roll. Tilting from straight down
+  keeps the heading, and the compass no longer jitters looking straight down.
+- Keyboard moves work anywhere on the Earth (they had been undone by the pivot each frame). North up keeps the same place
+  in view on the globe. The relief switch leaves the camera alone far from the crater. Views arrive level. Leaving Fly
+  mode keeps the view, and choosing Fly on the globe goes to the crater first. Grabbing works from below the ground.
