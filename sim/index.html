@@ -528,6 +528,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 // Language: the English text is in the page and the code; hu.js maps it to Hungarian (long texts by their first 60 characters)
 const LANG = (() => { const q = new URLSearchParams(location.search).get('lang'); if (q) return q === 'hu' ? 'hu' : 'en'; try { return localStorage.getItem('chicxulub.lang') === 'hu' ? 'hu' : 'en'; } catch (_) { return 'en'; } })();
@@ -3366,9 +3367,39 @@ addEventListener('keydown', e => {
   if (!guide || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.code === 'Escape') stopGuide(); else if (GUIDE_NAV.has(e.code)) guideTouched();
 });
+// ---------- VR (WebXR, e.g. Meta Quest): the same scene as a model in front of you ----------
+// The camera rides in a rig placed where the desktop camera was and scaled so the point looked at is 1 m away: the
+// headset's metres become the rig's scale in the world, which gives stereo depth and head movement at any zoom.
+// Either thumbstick: forward/back zooms, left/right turns the model; trigger: play / pause. No bloom or labels in VR.
+const rig = new THREE.Group(); scene.add(rig);
+let xrOn = false, xrTrig = false, xrPatched = false;
+renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
+if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) document.body.appendChild(VRButton.createButton(renderer)); }).catch(() => {});
+renderer.xr.addEventListener('sessionstart', () => {
+  rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
+  if (!xrPatched) {          // the composer does tone mapping and sRGB on the desktop; drawn straight to the headset, each shader must (a no-op when drawing into the composer)
+    xrPatched = true;
+    scene.traverse(o => { for (const m of [].concat(o.material || [])) if (m.isShaderMaterial && !m.isRawShaderMaterial && m.fragmentShader.includes('gl_FragColor') && !m.fragmentShader.includes('colorspace_fragment')) {
+      m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
+  }
+  xrOn = true;
+});
+renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
+const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
+function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
+  if (camera.parent === rig) { camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); }
+  let ax = 0, ay = 0, trig = false;
+  for (const src of renderer.xr.getSession()?.inputSources || []) { const g = src.gamepad; if (!g) continue;
+    if (Math.abs(g.axes[2] || 0) > 0.15) ax += g.axes[2]; if (Math.abs(g.axes[3] || 0) > 0.15) ay += g.axes[3]; trig = trig || !!g.buttons[0]?.pressed; }
+  const T = controls.target, f = clamp(Math.exp(ay * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
+  _xq.setFromAxisAngle(_xu.copy(T).sub(EC).normalize(), -ax * dt * 1.2);
+  rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq); rig.scale.multiplyScalar(f);
+  if (trig && !xrTrig) setPlaying(!playing);
+  xrTrig = trig;
+}
 function frame(now) {
   const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
-  adaptResolution(dt);
+  if (xrOn) xrBefore(dt); else adaptResolution(dt);
   U.uTime.value = now / 1000;
   if (goAnim) stepGo(dt);
   if (tour) stepTour(dt);
@@ -3382,7 +3413,7 @@ function frame(now) {
   GU.uT.value = S.imp.t;
   if (seaTour && playing && S.imp.t > 2500) { seaTour = false; VIEWS.gulf(); }
   updateFx();
-  updateCamera(dt);
+  if (!xrOn) updateCamera(dt);
   const camD = camera.position.distanceTo(controls.target), alt = altitude(), fk = farK();
   setGlobeMode(fk > 0.5);
   U.uFogD.value = airOn ? (1 - smooth(1.5e6, 6e6, alt)) / Math.max(2.4e6, camD * 2.2) : 0; gulfFill.uFill.value = camD > 1.1e6 ? 1 : 0;
@@ -3391,15 +3422,15 @@ function frame(now) {
   GLOBE_CAM.value.copy(camera.position).applyMatrix4(EARTH_INV);
   { const tc = scene.getObjectByName('todayCoast'); if (tc) tc.visible = showCoast && fk > 0.05; }
   camera.near = clamp(camera.position.distanceTo(controls.target) * 0.0005, 2, 400); camera.updateProjectionMatrix();
+  if (xrOn) { camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
   composer.render();
   updateLabels(); updateGlobeLabels(); declutter();
   updateNavUI(dt);
-  requestAnimationFrame(frame);
 }
 setCut('off'); setFires(pref('fires') === null ? 1 : +pref('fires'));
 VIEWS.start(); fly.t = 1;
 apply(P); updateModeHint();
-requestAnimationFrame(frame);
+renderer.setAnimationLoop(frame);
 S0.set(0, 0, -60e3); enterGlobe(true).catch(() => $('loading').classList.add('done'));      // open on the globe; the loading screen stays up until it is ready
 setTimeout(() => { loadSky().then(() => loadTopo()).then(() => loadSWE()).then(() => loadCoast()).then(() => ensureFrames()).then(() => ensureClimate()).catch(() => {}); }, 1500);   // stream the rest after the first view      // the globe data also drive the sky glow, haze and frost in this view
 if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact };
