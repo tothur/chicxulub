@@ -348,3 +348,29 @@ v37 (2026-11-08): guided tour.
 - A captioned run through the whole event in about 3.5 minutes, started only by the Guided tour button or Views > Watch
   (GUIDE in sim/index.html: each scene has a camera shot, a time span and a caption). Navigating by hand pauses it; Play
   returns to the scene's view. One scene steps back in time, to the first hour at the crater, and its caption says so.
+
+v38 (2026-11-09): the regional tsunami solver conserves water.
+- Why: the old scheme cut every crest at 0.8 x depth + 30 m by deleting the water above it. Counted over the 10 h run
+  that was 44,900 km3, five times the starting ring wave (8,980 km3), most of it between 1 and 4 h on the northern
+  shelves; flooded area and coastal heights were set by the cut (hence "the median is not monotonic in A0", v17).
+- swe.py is now a finite-volume scheme on cell centres: second order (limited slopes, theta 1.5; Heun time stepping,
+  CFL 0.3), HLL fluxes, the hydrostatic reconstruction of Audusse et al. 2004. The momentum equation is complete
+  (advection included), bores form and dissipate by themselves, a sea at rest stays at rest against dry land, and the
+  volume of water changes only through the open edges and their sponge (printed at the end of the run: ~76,000 km3 flows in as the region the
+  impact emptied refills). No height limit. Friction, sponge width, initial state and all output
+  formats are as before, so the viewer is unchanged. About 5 min instead of 20 s.
+- pipeline/swe_test.py (not part of the build) checks the solver: sea at rest over rough ground with islands (changes
+  < 1e-12 m), dam break on a dry bed against Ritter's solution, on shallow water against Stoker's (bore height and
+  position), and exact conservation of volume with shores wetting and drying.
+- Re-calibrated, and the open-Gulf crests now rise steadily with the ring's height (A0 465 / 650 / 900 m: median 76 /
+  101 / 131 m): SWE_A0 = 900 m, open-Gulf median 131 m, 90th percentile 246 m (was 128 / 342 m); New Orleans 1.4 h,
+  Houston 2.15 h, Tampa 1.55 h, Veracruz 1.1 h (earlier than before: the complete equations carry a high wave faster);
+  144,000 km2 flooded (was 74,000). A town with no sea within 80 km (Monterrey) gets its deepest flood as its height.
+- Not changed: globe.py, the linear global run, still has its own limit near shore and a dry-bed floor (over 48 h they
+  remove 15,600 km3 and add 36,700 km3 against a ring of 45,200 km3); its calibration target (open-Gulf median ~135 m)
+  still matches the regional run. The viewer's sketch of the first 10 minutes now ends at a 900 m ring (was 500) to meet the run's start; its width and trailing trough still differ.
+- Speed (2026-11-15): same arithmetic, fewer sweeps of the grid. Friction, sponge and the arrival/maximum records are
+  done inside the step's last update pass instead of a pass of their own (which had been running on one thread), each
+  update pass leaves the velocities for the next reconstruction, and the slopes and fluxes are stored per cell, side
+  by side. A one-hour run: 17 s instead of 25-28 s, output files byte-identical. SWE_CFL overrides the time-step
+  factor (default 0.3, as before); a larger value is faster but changes the results and has not been validated.
