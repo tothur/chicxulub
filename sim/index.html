@@ -3379,7 +3379,14 @@ renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // headset (see the renderer), and a viewport that shrinks further while frames come late and grows back when they do not.
 renderer.xr.setFramebufferScaleFactor(0.7); renderer.xr.setFoveation(1);
 let xrScale = 0.8, xrDt = 0.014, xrLast = 0, xrTune = 0;
-if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) document.body.appendChild(VRButton.createButton(renderer)); }).catch(() => {});
+if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
+  const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
+  const tip = document.createElement('div'); tip.id = 'vrTip';
+  tip.style.cssText = 'position:absolute;top:66px;left:50%;transform:translateX(-50%);z-index:999;max-width:min(92vw,560px);padding:6px 12px;border-radius:10px;background:rgba(16,18,24,.78);color:#cfd6e0;font:12px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none';
+  tip.textContent = 'In VR · Grip: grab the world (two hands: stretch, turn) · Left stick: zoom, turn · Right stick: time, zoom · Trigger: play / pause · A / X, B / Y: chapters';
+  document.body.append(b, tip);
+  renderer.xr.addEventListener('sessionstart', () => { tip.hidden = true; });          // shown until VR has been entered once
+}).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
   if (!xrPatched) {          // the composer does tone mapping and sRGB on the desktop; drawn straight to the headset, each shader must (a no-op when drawing into the composer)
