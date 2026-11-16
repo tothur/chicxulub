@@ -3384,11 +3384,7 @@ renderer.xr.setFramebufferScaleFactor(0.8); renderer.xr.setFoveation(1);
 let xrScale = 1, xrDt = 0.014, xrLast = 0, xrTune = 0;
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
-  const tip = document.createElement('div'); tip.id = 'vrTip';
-  tip.style.cssText = 'position:absolute;top:66px;left:50%;transform:translateX(-50%);z-index:999;max-width:min(92vw,560px);padding:6px 12px;border-radius:10px;background:rgba(16,18,24,.78);color:#cfd6e0;font:12px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none';
-  tip.textContent = 'In VR · Point at the panel and pull the trigger · Grip: grab the world (two hands: stretch, turn) · Left stick: turn, tilt · Right stick: time, zoom · A / X: play · B / Y: bring the panel back';
-  document.body.append(b, tip);
-  renderer.xr.addEventListener('sessionstart', () => { tip.hidden = true; });          // shown until VR has been entered once
+  document.body.append(b);
 }).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
@@ -3398,7 +3394,7 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrOn = true;
+  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3444,8 +3440,8 @@ const xrCtl = [0, 1].map(i => {
 const buzz = (c, a = 0.5, ms = 14) => { try { c.userData.src?.gamepad?.hapticActuators?.[0]?.pulse?.(a, ms); } catch (_) {} };
 // what is on the panel (canvas pixels)
 const TL = { x: 56, y: 452, w: XW - 112, h: 14 };
-const XB = [['prev', '◀  Chapter'], ['play', ''], ['next', 'Chapter  ▶'], ['earth', 'Whole Earth'], ['gulf', 'The Gulf'], ['crater', 'The crater'], ['exit', 'Leave VR']]
-  .map(([id, label], i) => i < 3 ? { id, label, x: 40 + i * 320, y: 508, w: 304, h: 76 } : { id, label, x: 40 + (i - 3) * 240, y: 604, w: 224, h: 68 });
+const XB = [['prev', '◀  Chapter'], ['play', ''], ['next', 'Chapter  ▶'], ['earth', 'Whole Earth'], ['gulf', 'The Gulf'], ['crater', 'The crater'], ['help', 'Controls'], ['exit', 'Leave VR']]
+  .map(([id, label], i) => i < 3 ? { id, label, x: 40 + i * 320, y: 508, w: 304, h: 76 } : { id, label, x: 40 + (i - 3) * 192, y: 604, w: 176, h: 68 });
 const _hp = new THREE.Vector3(), _hq = new THREE.Quaternion(), _xcam = new THREE.PerspectiveCamera();
 function xrSeat(pos, quat, dist) {          // put the rig so the head sees what a camera at pos / quat would, with the place looked at dist away shown at 1 m
   const s = clamp(dist, 50, 4e7); rig.quaternion.copy(quat).multiply(_xq.copy(_hq).invert()); rig.scale.setScalar(s);
@@ -3465,6 +3461,7 @@ function xrPress(c, hit) {
   if (id === 'time') { c.userData.drag = 'time'; return; }
   if (id === 'prev') chapter(-1); else if (id === 'next') chapter(1); else if (id === 'play') setPlaying(!playing);
   else if (id === 'earth') xrView(2.6e7, 0); else if (id === 'gulf') xrView(3.4e6, 32); else if (id === 'crater') xrView(3.0e5, 46);
+  else if (id === 'help') xrHelp = !xrHelp;
   else if (id === 'exit') renderer.xr.getSession()?.end();
   xrKey = '';
 }
@@ -3483,13 +3480,15 @@ function xrPoint(c) {                        // where this hand's ray meets the 
   d.hit = px > TL.x - 16 && px < TL.x + TL.w + 16 && py > TL.y - 34 && py < TL.y + 44 ? { id: 'time' } : XB.find(b => px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h) || { id: 'panel' };
   d.hot = d.hit.id; if (d.hot !== was && d.hot !== 'panel') buzz(c, 0.15, 6);
 }
-let xrKey = '', xrDrawT = 0;
+let xrKey = '', xrDrawT = 0, xrHelp = true;          // the controls are explained on the panel when VR starts; the Controls button switches back to the story
+const XR_HELP = [['Trigger', 'Press a button, drag the timeline'], ['Grip', 'Grab the world. Both hands: stretch and turn it'], ['Grip on the panel', 'Carry the panel somewhere else'],
+  ['Left stick', 'Turn and tilt the Earth'], ['Right stick', 'Left / right: time.  Forward / back: zoom'], ['A or X', 'Play or pause'], ['B or Y', 'Bring this panel back in front of you']];
 function xrDraw(dt) {
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.08;
   const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
   if (lines[3] && /\d/.test(lines[3])) lines[2] += '  ·  ' + lines[3];          // the age and the clock are separate lines on the page
   const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`;
-  const key = [lines[1], lines[2], playing, hot, Math.round(P * 2000), perf].join('|');
+  const key = [lines[1], lines[2], playing, hot, Math.round(P * 2000), perf, xrHelp].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
   g.clearRect(0, 0, XW, XH);
@@ -3502,6 +3501,10 @@ function xrDraw(dt) {
   // the story of this moment, wrapped
   g.fillStyle = '#d5dae3'; g.font = '25px system-ui, sans-serif';
   const words = tr((STAGES[S.phase] || ['', ''])[1]).split(' '); let line = '', y = 204, n = 0;
+  if (xrHelp) {
+    XR_HELP.forEach(([k, t], i) => { g.fillStyle = '#ffa366'; g.font = '600 24px system-ui, sans-serif'; g.fillText(tr(k), 44, 204 + i * 33, 230); g.fillStyle = '#d5dae3'; g.font = '24px system-ui, sans-serif'; g.fillText(tr(t), 290, 204 + i * 33, XW - 334); });
+    n = 7; line = '';
+  }
   for (let i = 0; i < words.length && n < 7; i++) {
     const t = line ? line + ' ' + words[i] : words[i];
     if (g.measureText(t).width > XW - 88 && line) { g.fillText(n === 6 ? line.replace(/.{3}$/, '…') : line, 44, y); y += 34; n++; line = words[i]; } else line = t;
@@ -3517,9 +3520,9 @@ function xrDraw(dt) {
   g.beginPath(); g.arc(X(P), TL.y + TL.h / 2, tHot ? 17 : 13, 0, 7); g.fillStyle = '#fff'; g.fill();
   // buttons
   for (const b of XB) {
-    const on = hot.includes(b.id), main = b.id === 'play';
+    const on = hot.includes(b.id) || (b.id === 'help' && xrHelp), main = b.id === 'play';
     rr(b.x, b.y, b.w, b.h, 20); g.fillStyle = main ? (on ? '#ffb685' : '#ffa366') : on ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.1)'; g.fill();
-    g.fillStyle = main ? '#16181d' : b.id === 'exit' ? '#ffb3a8' : '#fff'; g.font = `600 ${b.h > 70 ? 29 : 25}px system-ui, sans-serif`;
+    g.fillStyle = main ? '#16181d' : b.id === 'exit' ? '#ffb3a8' : '#fff'; g.font = `600 ${b.h > 70 ? 29 : 23}px system-ui, sans-serif`;
     g.fillText(main ? (playing ? '❚❚  ' + tr('Pause') : '▶  ' + tr('Play')) : tr(b.label), b.x + b.w / 2, b.y + b.h / 2 + 10, b.w - 24);
   }
   g.textAlign = 'left'; xrTex.needsUpdate = true;
