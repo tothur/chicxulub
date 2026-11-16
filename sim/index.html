@@ -3372,7 +3372,7 @@ addEventListener('keydown', e => {
 // headset's metres become the rig's scale in the world, which gives stereo depth and head movement at any zoom.
 // Either thumbstick: forward/back zooms, left/right turns the model; trigger: play / pause. No bloom or labels in VR.
 const rig = new THREE.Group(); scene.add(rig);
-let xrOn = false, xrTrig = false, xrPatched = false;
+let xrOn = false, xrPatched = false;
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) document.body.appendChild(VRButton.createButton(renderer)); }).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
@@ -3386,16 +3386,75 @@ renderer.xr.addEventListener('sessionstart', () => {
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
+// Controllers: a pointer on each hand. Grip (side button) grabs the world: one hand drags it, two hands stretch and turn it.
+// Sticks: left = zoom (forward/back) and turn (left/right); right = time (left/right) and zoom. Trigger: play / pause.
+// A or X: next chapter, B or Y: previous. A small panel on the left hand shows the moment and these controls.
+const xrCtl = [0, 1].map(i => {
+  const c = renderer.xr.getController(i); rig.add(c);
+  c.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -0.25)]), new THREE.LineBasicMaterial({ color: 0xffb070 })));
+  c.add(new THREE.Mesh(new THREE.SphereGeometry(0.012, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffb070 })));
+  c.userData.prev = new THREE.Vector3();
+  c.addEventListener('squeezestart', () => { c.userData.grab = true; c.userData.prev.copy(c.position); });
+  c.addEventListener('squeezeend', () => { c.userData.grab = false; });
+  c.addEventListener('connected', e => { c.userData.hand = e.data.handedness; if (e.data.handedness === 'left') c.add(xrPanel); });
+  c.addEventListener('disconnected', () => { c.userData.grab = false; });
+  return c;
+});
+const xrCv = document.createElement('canvas'); xrCv.width = 512; xrCv.height = 320;
+const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace;
+const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.125), new THREE.MeshBasicMaterial({ map: xrTex, transparent: true, toneMapped: false }));
+xrPanel.position.set(0, 0.09, -0.04); xrPanel.rotation.x = -0.9;
+let xrText = '', xrTextT = 0;
+function xrDrawPanel(dt) {
+  if ((xrTextT -= dt) > 0) return; xrTextT = 0.25;
+  const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean).slice(0, 3);
+  const text = lines.join('|') + (playing ? '>' : '');
+  if (text === xrText) return; xrText = text;
+  const g = xrCv.getContext('2d'); g.clearRect(0, 0, 512, 320); g.fillStyle = 'rgba(16,18,24,0.86)'; g.fillRect(0, 0, 512, 320);
+  g.fillStyle = '#fff'; g.font = '600 34px system-ui, sans-serif'; g.fillText(lines[1] || lines[0] || '', 20, 52, 472);
+  g.fillStyle = '#ffb070'; g.font = '26px system-ui, sans-serif'; g.fillText((playing ? '▶ ' : '❚❚ ') + (lines[2] || ''), 20, 96, 472);
+  g.fillStyle = '#b8c0cc'; g.font = '21px system-ui, sans-serif';
+  ['Grip: grab the world (two hands: stretch, turn)', 'Left stick: zoom, turn', 'Right stick: time ◀ ▶, zoom', 'Trigger: play / pause', 'A / X: next chapter · B / Y: back'].forEach((t, i) => g.fillText(t, 20, 146 + i * 36, 472));
+  xrTex.needsUpdate = true;
+}
+const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
+let xrBtn = 0;
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
   if (camera.parent === rig) { camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); }
-  let ax = 0, ay = 0, trig = false;
-  for (const src of renderer.xr.getSession()?.inputSources || []) { const g = src.gamepad; if (!g) continue;
-    if (Math.abs(g.axes[2] || 0) > 0.15) ax += g.axes[2]; if (Math.abs(g.axes[3] || 0) > 0.15) ay += g.axes[3]; trig = trig || !!g.buttons[0]?.pressed; }
-  const T = controls.target, f = clamp(Math.exp(ay * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
-  _xq.setFromAxisAngle(_xu.copy(T).sub(EC).normalize(), -ax * dt * 1.2);
-  rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq); rig.scale.multiplyScalar(f);
-  if (trig && !xrTrig) setPlaying(!playing);
-  xrTrig = trig;
+  rig.updateMatrixWorld(true);
+  // grab: keep the world point that was in the hand (or between the hands) there
+  const gr = xrCtl.filter(c => c.userData.grab);
+  if (gr.length === 1) {
+    const c = gr[0]; _xw.copy(c.userData.prev).applyMatrix4(rig.matrixWorld).sub(_xa.copy(c.position).applyMatrix4(rig.matrixWorld)); rig.position.add(_xw);
+  } else if (gr.length === 2) {
+    const [c0, c1] = gr, p0 = c0.userData.prev, p1 = c1.userData.prev;
+    _xw.copy(p0).add(p1).multiplyScalar(0.5).applyMatrix4(rig.matrixWorld);                       // the world point between the hands a frame ago
+    const d0 = Math.max(p0.distanceTo(p1), 0.02), d1 = Math.max(c0.position.distanceTo(c1.position), 0.02);
+    _xa.copy(p1).sub(p0).normalize(); _xb.copy(c1.position).sub(c0.position).normalize();
+    rig.quaternion.multiply(_xr.setFromUnitVectors(_xb, _xa)).normalize();
+    rig.scale.multiplyScalar(clamp(d0 / d1, 50 / rig.scale.x, 4e7 / rig.scale.x)); rig.updateMatrixWorld(true);
+    rig.position.add(_xw.sub(_xa.copy(c0.position).add(c1.position).multiplyScalar(0.5).applyMatrix4(rig.matrixWorld)));
+  }
+  for (const c of gr) c.userData.prev.copy(c.position);
+  // sticks and buttons
+  let turn = 0, zoom = 0, time = 0, btn = 0; const dz = x => Math.abs(x || 0) > 0.2 ? x : 0;
+  for (const src of renderer.xr.getSession()?.inputSources || []) {
+    const g = src.gamepad; if (!g) continue;
+    const x = dz(g.axes[2]) || dz(g.axes[0]), y = dz(g.axes[3]) || dz(g.axes[1]);      // thumbstick, or a touchpad on other controllers
+    zoom += y; if (src.handedness === 'right') time += x; else turn += x;
+    if (g.buttons[0]?.pressed) btn |= 1; if (g.buttons[4]?.pressed) btn |= 2; if (g.buttons[5]?.pressed) btn |= 4;
+  }
+  if (zoom || turn) {          // about the point 1 m in front of the head: what you are looking at
+    const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld), f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
+    _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);
+    rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
+  }
+  if (time) { setPlaying(false); setP(P + time * dt * 0.04); }
+  const hit = btn & ~xrBtn; xrBtn = btn;
+  if (hit & 1) setPlaying(!playing);
+  if (hit & 2) chapter(1);
+  if (hit & 4) chapter(-1);
+  xrDrawPanel(dt);
 }
 function frame(now) {
   const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
