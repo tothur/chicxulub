@@ -3370,9 +3370,12 @@ addEventListener('keydown', e => {
 // ---------- VR (WebXR, e.g. Meta Quest): the same scene as a model in front of you ----------
 // The camera rides in a rig placed where the desktop camera was and scaled so the point looked at is 1 m away: the
 // headset's metres become the rig's scale in the world, which gives stereo depth and head movement at any zoom.
-// Either thumbstick: forward/back zooms, left/right turns the model; trigger: play / pause. No bloom or labels in VR.
+// No bloom or place labels in VR; the interface is the panel further down.
 const rig = new THREE.Group(); scene.add(rig);
 let xrOn = false, xrPatched = false;
+if (location.search.includes('xrsim')) {          // development: an emulated Quest 3 (Meta's IWER) for browsers without a headset; drive it through window.__xr
+  const { XRDevice, metaQuest3 } = await import('https://cdn.jsdelivr.net/npm/iwer@2.8.0/+esm'); window.__xr = new XRDevice(metaQuest3); window.__xr.installRuntime({ forceInstall: true });
+}
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
 // So: a smaller eye buffer (0.7 = half the pixels), full foveation (coarser toward the edges), no multisampling on the
@@ -3383,7 +3386,7 @@ if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { i
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
   const tip = document.createElement('div'); tip.id = 'vrTip';
   tip.style.cssText = 'position:absolute;top:66px;left:50%;transform:translateX(-50%);z-index:999;max-width:min(92vw,560px);padding:6px 12px;border-radius:10px;background:rgba(16,18,24,.78);color:#cfd6e0;font:12px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none';
-  tip.textContent = 'In VR · Grip: grab the world (two hands: stretch, turn) · Left stick: zoom, turn · Right stick: time, zoom · Trigger: play / pause · A / X, B / Y: chapters';
+  tip.textContent = 'In VR · Point at the panel and pull the trigger · Grip: grab the world (two hands: stretch, turn) · Left stick: zoom, turn · Right stick: time · A / X: play · B / Y: bring the panel back';
   document.body.append(b, tip);
   renderer.xr.addEventListener('sessionstart', () => { tip.hidden = true; });          // shown until VR has been entered once
 }).catch(() => {});
@@ -3392,49 +3395,139 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (!xrPatched) {          // the composer does tone mapping and sRGB on the desktop; drawn straight to the headset, each shader must (a no-op when drawing into the composer)
     xrPatched = true;
     scene.traverse(o => { for (const m of [].concat(o.material || [])) if (m.isShaderMaterial && !m.isRawShaderMaterial && m.fragmentShader.includes('gl_FragColor') && !m.fragmentShader.includes('colorspace_fragment')) {
-      m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
+      m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 0.8; xrLast = 0; xrOn = true;
+  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
-// Controllers: a pointer on each hand. Grip (side button) grabs the world: one hand drags it, two hands stretch and turn it.
-// Sticks: left = zoom (forward/back) and turn (left/right); right = time (left/right) and zoom. Trigger: play / pause.
-// A or X: next chapter, B or Y: previous. A small panel on the left hand shows the moment and these controls.
+// The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
+// there: sprite sizes, fades and the logarithmic depth all assume world metres. So just before each draw the eye cameras
+// are rewritten without the scale: same eye positions in the world, view space in world metres, depth range scaled to match.
+const _one = new THREE.Vector3(1, 1, 1); let xrNear = 1;
+scene.onBeforeRender = (r, sc, cam) => {
+  if (!xrOn || !cam.isArrayCamera) return;
+  const s = rig.scale.x;
+  for (const c of [cam, ...cam.cameras]) {
+    c.matrixWorld.decompose(_xu, _xq, _xs); c.matrixWorld.compose(_xu, _xq, _one); c.matrixWorldInverse.copy(c.matrixWorld).invert();
+    c.projectionMatrix.elements[14] *= s; c.projectionMatrixInverse.copy(c.projectionMatrix).invert(); c.near = xrNear; c.far = 2e9;
+  }
+  const e = cam.cameras[0]; if (e) ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2;          // pixels per unit of tangent, for sprite sizes
+};
+// ---- the interface in VR: a console panel floating in front of you, worked with a laser pointer from either hand ----
+// Point at it and pull the trigger to press a button or drag the timeline; hold the grip while pointing at it to carry it
+// somewhere else. Off the panel the grip grabs the world (one hand drags, two hands stretch and turn).
+// Sticks: left = zoom and turn, right = time and zoom. A / X: play or pause. B / Y: bring the panel back in front of you.
+const XW = 1024, XH = 704, PW = 0.5, PH = PW * XH / XW;
+const xrCv = document.createElement('canvas'); xrCv.width = XW; xrCv.height = XH;
+const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace; xrTex.anisotropy = 4;
+const xrUi = o => Object.assign(o, { transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false });   // drawn last, over the world
+const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBasicMaterial(xrUi({ map: xrTex })));
+xrPanel.renderOrder = 1000; xrPanel.frustumCulled = false; rig.add(xrPanel);
 const xrCtl = [0, 1].map(i => {
   const c = renderer.xr.getController(i); rig.add(c);
-  c.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -0.25)]), new THREE.LineBasicMaterial({ color: 0xffb070 })));
-  c.add(new THREE.Mesh(new THREE.SphereGeometry(0.012, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffb070 })));
-  c.userData.prev = new THREE.Vector3();
-  c.addEventListener('squeezestart', () => { c.userData.grab = true; c.userData.prev.copy(c.position); });
-  c.addEventListener('squeezeend', () => { c.userData.grab = false; });
-  c.addEventListener('connected', e => { c.userData.hand = e.data.handedness; if (e.data.handedness === 'left') c.add(xrPanel); });
-  c.addEventListener('disconnected', () => { c.userData.grab = false; });
+  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffa366, opacity: 0.75 })));
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.009, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffa366 })));
+  const cur = new THREE.Mesh(new THREE.RingGeometry(0.004, 0.007, 20), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff })));
+  ray.renderOrder = tip.renderOrder = 1002; cur.renderOrder = 1001; cur.visible = false; ray.frustumCulled = tip.frustumCulled = cur.frustumCulled = false;
+  c.add(ray, tip); xrPanel.add(cur);
+  const d = c.userData; Object.assign(d, { ray, cur, prev: new THREE.Vector3(), grab: false, hold: false, sel: false, hit: null, drag: null });
+  c.addEventListener('connected', e => { d.src = e.data; });
+  c.addEventListener('disconnected', () => { d.grab = d.sel = false; d.drag = null; if (d.hold) { d.hold = false; rig.attach(xrPanel); } });
+  c.addEventListener('squeezestart', () => { if (d.hit && xrPanel.parent === rig) { d.hold = true; c.attach(xrPanel); } else { d.grab = true; d.prev.copy(c.position); } });
+  c.addEventListener('squeezeend', () => { d.grab = false; if (d.hold) { d.hold = false; rig.attach(xrPanel); } });
+  c.addEventListener('selectstart', () => { d.sel = true; if (d.hit) xrPress(c, d.hit); });
+  c.addEventListener('selectend', () => { d.sel = false; d.drag = null; });
   return c;
 });
-const xrCv = document.createElement('canvas'); xrCv.width = 512; xrCv.height = 352;
-const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace;
-const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.1375), new THREE.MeshBasicMaterial({ map: xrTex, transparent: true, toneMapped: false }));
-xrPanel.position.set(0, 0.09, -0.04); xrPanel.rotation.x = -0.9;
-let xrText = '', xrTextT = 0;
-function xrDrawPanel(dt) {
-  if ((xrTextT -= dt) > 0) return; xrTextT = 0.25;
-  const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean).slice(0, 3);
-  const perf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 70)}% resolution`;
-  const text = lines.join('|') + (playing ? '>' : '') + perf;
-  if (text === xrText) return; xrText = text;
-  const g = xrCv.getContext('2d'); g.clearRect(0, 0, 512, 352); g.fillStyle = 'rgba(16,18,24,0.86)'; g.fillRect(0, 0, 512, 352);
-  g.fillStyle = '#fff'; g.font = '600 34px system-ui, sans-serif'; g.fillText(lines[1] || lines[0] || '', 20, 52, 472);
-  g.fillStyle = '#ffb070'; g.font = '26px system-ui, sans-serif'; g.fillText((playing ? '▶ ' : '❚❚ ') + (lines[2] || ''), 20, 96, 472);
-  g.fillStyle = '#b8c0cc'; g.font = '21px system-ui, sans-serif';
-  ['Grip: grab the world (two hands: stretch, turn)', 'Left stick: zoom, turn', 'Right stick: time ◀ ▶, zoom', 'Trigger: play / pause', 'A / X: next chapter · B / Y: back', perf].forEach((t, i) => g.fillText(t, 20, 146 + i * 36, 472));
-  xrTex.needsUpdate = true;
+const buzz = (c, a = 0.5, ms = 14) => { try { c.userData.src?.gamepad?.hapticActuators?.[0]?.pulse?.(a, ms); } catch (_) {} };
+// what is on the panel (canvas pixels)
+const TL = { x: 56, y: 452, w: XW - 112, h: 14 };
+const XB = [['prev', '◀  Chapter'], ['play', ''], ['next', 'Chapter  ▶'], ['earth', 'Whole Earth'], ['gulf', 'The Gulf'], ['crater', 'The crater'], ['exit', 'Leave VR']]
+  .map(([id, label], i) => i < 3 ? { id, label, x: 40 + i * 320, y: 508, w: 304, h: 76 } : { id, label, x: 40 + (i - 3) * 240, y: 604, w: 224, h: 68 });
+const _hp = new THREE.Vector3(), _hq = new THREE.Quaternion(), _xcam = new THREE.PerspectiveCamera();
+function xrSeat(pos, quat, dist) {          // put the rig so the head sees what a camera at pos / quat would, with the place looked at dist away shown at 1 m
+  const s = clamp(dist, 50, 4e7); rig.quaternion.copy(quat).multiply(_xq.copy(_hq).invert()); rig.scale.setScalar(s);
+  rig.position.copy(pos).sub(_xu.copy(_hp).multiplyScalar(s).applyQuaternion(rig.quaternion));
+}
+function xrView(h, tilt) {                   // look at the crater from h metres, tilt degrees off the vertical, from the south, north up
+  const a = tilt * Math.PI / 180; _xcam.position.set(0, h * Math.cos(a), h * Math.sin(a)); _xcam.up.set(0, 0, -1); _xcam.lookAt(0, 0, 0);
+  xrSeat(_xcam.position, _xcam.quaternion, h);
+}
+function xrSummon() {                        // the panel: below the line of sight, half a metre ahead, facing the head
+  if (xrPanel.parent !== rig) return;
+  const f = _xu.set(0, 0, -1).applyQuaternion(_hq); f.y = 0; if (f.lengthSq() < 1e-4) f.set(0, 0, -1); f.normalize();
+  xrPanel.position.copy(_hp).addScaledVector(f, 0.58); xrPanel.position.y -= 0.36; xrPanel.rotation.set(-0.5, Math.atan2(-f.x, -f.z), 0, 'YXZ');
+}
+function xrPress(c, hit) {
+  const id = hit.id; buzz(c, 0.7, 18);
+  if (id === 'time') { c.userData.drag = 'time'; return; }
+  if (id === 'prev') chapter(-1); else if (id === 'next') chapter(1); else if (id === 'play') setPlaying(!playing);
+  else if (id === 'earth') xrView(2.6e7, 0); else if (id === 'gulf') xrView(3.4e6, 32); else if (id === 'crater') xrView(3.0e5, 46);
+  else if (id === 'exit') renderer.xr.getSession()?.end();
+  xrKey = '';
+}
+const _ro = new THREE.Vector3(), _rd = new THREE.Vector3(), _rm = new THREE.Matrix4();
+function xrPoint(c) {                        // where this hand's ray meets the panel: sets the cursor, the ray's length and what is under it
+  const d = c.userData; d.hit = null; d.cur.visible = false; d.ray.scale.z = 0.35;
+  if (xrPanel.parent !== rig || d.grab) return;
+  xrPanel.updateMatrix(); _rm.copy(xrPanel.matrix).invert();
+  _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0, 0, -1).applyQuaternion(c.quaternion).transformDirection(_rm);
+  if (_ro.z <= 0 || _rd.z >= -1e-4) return;
+  const t = -_ro.z / _rd.z, x = _ro.x + t * _rd.x, y = _ro.y + t * _rd.y, px = (x / PW + 0.5) * XW, py = (0.5 - y / PH) * XH;
+  if (d.drag === 'time') { setPlaying(false); setP(clamp((px - TL.x) / TL.w, 0, 1)); }
+  if (Math.abs(x) > PW / 2 + 0.02 || Math.abs(y) > PH / 2 + 0.02 || t > 3) return;
+  d.ray.scale.z = t; d.cur.visible = true; d.cur.position.set(x, y, 0.001);
+  const was = d.hot;
+  d.hit = px > TL.x - 16 && px < TL.x + TL.w + 16 && py > TL.y - 34 && py < TL.y + 44 ? { id: 'time' } : XB.find(b => px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h) || { id: 'panel' };
+  d.hot = d.hit.id; if (d.hot !== was && d.hot !== 'panel') buzz(c, 0.15, 6);
+}
+let xrKey = '', xrDrawT = 0;
+function xrDraw(dt) {
+  if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.08;
+  const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+  if (lines[3] && /\d/.test(lines[3])) lines[2] += '  ·  ' + lines[3];          // the age and the clock are separate lines on the page
+  const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = `${Math.round(1 / xrDt)} fps`;
+  const key = [lines[1], lines[2], playing, hot, Math.round(P * 2000), perf].join('|');
+  if (key === xrKey) return; xrKey = key;
+  const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
+  g.clearRect(0, 0, XW, XH);
+  rr(4, 4, XW - 8, XH - 8, 36); g.fillStyle = 'rgba(13,15,21,0.93)'; g.fill(); g.strokeStyle = 'rgba(255,255,255,0.14)'; g.lineWidth = 2; g.stroke();
+  g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+  g.fillStyle = '#8f98a8'; g.font = '600 19px system-ui, sans-serif'; g.fillText((lines[0] || '').toUpperCase(), 44, 52, XW - 220);
+  g.textAlign = 'right'; g.fillText(perf, XW - 44, 52); g.textAlign = 'left';
+  g.fillStyle = '#fff'; g.font = '500 50px Georgia, "Times New Roman", serif'; g.fillText(lines[1] || '', 42, 112, XW - 84);
+  g.fillStyle = '#ffa366'; g.font = '26px ui-monospace, Menlo, monospace'; g.fillText(lines[2] || '', 44, 156, XW - 88);
+  // the story of this moment, wrapped
+  g.fillStyle = '#d5dae3'; g.font = '25px system-ui, sans-serif';
+  const words = tr((STAGES[S.phase] || ['', ''])[1]).split(' '); let line = '', y = 204, n = 0;
+  for (let i = 0; i < words.length && n < 7; i++) {
+    const t = line ? line + ' ' + words[i] : words[i];
+    if (g.measureText(t).width > XW - 88 && line) { g.fillText(n === 6 ? line.replace(/.{3}$/, '…') : line, 44, y); y += 34; n++; line = words[i]; } else line = t;
+  }
+  if (n < 7 && line) g.fillText(line, 44, y);
+  // the timeline: chapters as ticks, drag anywhere along it
+  const tHot = hot.includes('time'), X = p => TL.x + p * TL.w;
+  rr(TL.x, TL.y, TL.w, TL.h, 7); g.fillStyle = 'rgba(255,255,255,0.14)'; g.fill();
+  rr(TL.x, TL.y, Math.max(P * TL.w, 14), TL.h, 7); g.fillStyle = '#ffa366'; g.fill();
+  g.fillStyle = 'rgba(255,255,255,0.5)'; for (const [, p] of TICKS) g.fillRect(X(p) - 1, TL.y - 8, 2, 6);
+  g.font = '17px system-ui, sans-serif'; g.fillStyle = '#8f98a8'; g.textAlign = 'center';
+  for (const [p, t] of [[pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 day'], [pOfT(YEAR), '1 yr'], [pOfT(1e3 * YEAR), '1,000 yr']]) g.fillText(tr(t), X(p), TL.y + 40);
+  g.beginPath(); g.arc(X(P), TL.y + TL.h / 2, tHot ? 17 : 13, 0, 7); g.fillStyle = '#fff'; g.fill();
+  // buttons
+  for (const b of XB) {
+    const on = hot.includes(b.id), main = b.id === 'play';
+    rr(b.x, b.y, b.w, b.h, 20); g.fillStyle = main ? (on ? '#ffb685' : '#ffa366') : on ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.1)'; g.fill();
+    g.fillStyle = main ? '#16181d' : b.id === 'exit' ? '#ffb3a8' : '#fff'; g.font = `600 ${b.h > 70 ? 29 : 25}px system-ui, sans-serif`;
+    g.fillText(main ? (playing ? '❚❚  ' + tr('Pause') : '▶  ' + tr('Play')) : tr(b.label), b.x + b.w / 2, b.y + b.h / 2 + 10, b.w - 24);
+  }
+  g.textAlign = 'left'; xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
-let xrBtn = 0;
+let xrBtn = 0, xrPlace = true;
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
-  if (camera.parent === rig) { camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); }
+  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(); } }
   rig.updateMatrixWorld(true);
   { // frame time (unclamped) -> viewport scale
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
@@ -3442,6 +3535,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
+  for (const c of xrCtl) xrPoint(c);
   // grab: keep the world point that was in the hand (or between the hands) there
   const gr = xrCtl.filter(c => c.userData.grab);
   if (gr.length === 1) {
@@ -3462,19 +3556,20 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     const g = src.gamepad; if (!g) continue;
     const x = dz(g.axes[2]) || dz(g.axes[0]), y = dz(g.axes[3]) || dz(g.axes[1]);      // thumbstick, or a touchpad on other controllers
     zoom += y; if (src.handedness === 'right') time += x; else turn += x;
-    if (g.buttons[0]?.pressed) btn |= 1; if (g.buttons[4]?.pressed) btn |= 2; if (g.buttons[5]?.pressed) btn |= 4;
+    if (g.buttons[4]?.pressed) btn |= 2; if (g.buttons[5]?.pressed) btn |= 4;
   }
-  if (zoom || turn) {          // about the point 1 m in front of the head: what you are looking at
-    const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld), f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
+  const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld);          // the point 1 m in front of the head: what you are looking at
+  if (zoom || turn) {
+    const f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
     _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);
     rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
   }
+  controls.target.copy(T);          // the app's own measures of distance (fog, near plane) follow the view, and the desktop view resumes from here
   if (time) { setPlaying(false); setP(P + time * dt * 0.04); }
   const hit = btn & ~xrBtn; xrBtn = btn;
-  if (hit & 1) setPlaying(!playing);
-  if (hit & 2) chapter(1);
-  if (hit & 4) chapter(-1);
-  xrDrawPanel(dt);
+  if (hit & 2) setPlaying(!playing);
+  if (hit & 4) xrSummon();
+  xrDraw(dt);
 }
 function frame(now) {
   const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
@@ -3501,7 +3596,7 @@ function frame(now) {
   GLOBE_CAM.value.copy(camera.position).applyMatrix4(EARTH_INV);
   { const tc = scene.getObjectByName('todayCoast'); if (tc) tc.visible = showCoast && fk > 0.05; }
   camera.near = clamp(camera.position.distanceTo(controls.target) * 0.0005, 2, 400); camera.updateProjectionMatrix();
-  if (xrOn) { camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
+  if (xrOn) { xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
   composer.render();
   updateLabels(); updateGlobeLabels(); declutter();
   updateNavUI(dt);
