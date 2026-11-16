@@ -3432,8 +3432,8 @@ const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBa
 xrPanel.renderOrder = 1000; xrPanel.frustumCulled = false; rig.add(xrPanel);
 const xrCtl = [0, 1].map(i => {
   const c = renderer.xr.getController(i); rig.add(c);
-  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffa366, opacity: 0.75 })));
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.009, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffa366 })));
+  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.45 })));
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.005, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.7 })));
   const cur = new THREE.Mesh(new THREE.RingGeometry(0.004, 0.007, 20), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff })));
   ray.renderOrder = tip.renderOrder = 1002; cur.renderOrder = 1001; cur.visible = false; ray.frustumCulled = tip.frustumCulled = cur.frustumCulled = false;
   c.add(ray, tip); xrPanel.add(cur);
@@ -3493,7 +3493,7 @@ let xrPk = -1, xrLines = [], xrPerf = '', xrPerfT = 0;
 let xrKey = '', xrDrawT = 0, xrHelp = true;          // the controls are explained on the panel when VR starts; the Controls button switches back to the story
 const XR_HELP = [['Trigger', 'Press a button, drag the timeline'], ['Grip', 'Grab the world. Both hands: stretch and turn it'], ['Grip on the panel', 'Carry the panel somewhere else'],
   ['Left stick', 'Turn and tilt the Earth'], ['Right stick', 'Left / right: time.  Forward / back: zoom'], ['A or X', 'Play or pause'], ['B or Y', 'Bring this panel back in front of you']];
-function xrDraw(dt) {
+function xrDraw(dt) {          // the look: a pane of frosted glass with a bright rim, white type, pill buttons (after visionOS)
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.1;
   const pk = Math.round(P * 2000);
   if (pk !== xrPk) {          // reading the page's text makes the browser lay the page out: only when the time has moved
@@ -3506,39 +3506,49 @@ function xrDraw(dt) {
   const key = [lines[1], lines[2], playing, hot, pk, perf, xrHelp].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
-  g.clearRect(0, 0, XW, XH);
-  rr(4, 4, XW - 8, XH - 8, 36); g.fillStyle = 'rgba(13,15,21,0.93)'; g.fill(); g.strokeStyle = 'rgba(255,255,255,0.14)'; g.lineWidth = 2; g.stroke();
+  const W = a => `rgba(255,255,255,${a})`, F = (w, px) => `${w} ${px}px -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", sans-serif`;
+  g.clearRect(0, 0, XW, XH); g.shadowColor = 'transparent';
+  // glass: a dim, slightly cool body, lighter toward the top, with a rim that catches the light at the top edge
+  rr(3, 3, XW - 6, XH - 6, 56);
+  let gr = g.createLinearGradient(0, 0, 0, XH); gr.addColorStop(0, 'rgba(92,96,106,0.80)'); gr.addColorStop(0.5, 'rgba(58,61,70,0.80)'); gr.addColorStop(1, 'rgba(44,46,54,0.84)');
+  g.fillStyle = gr; g.fill();
+  gr = g.createRadialGradient(XW * 0.3, -80, 40, XW * 0.3, -80, 620); gr.addColorStop(0, W(0.16)); gr.addColorStop(1, W(0)); g.fillStyle = gr; g.fill();      // a soft sheen from the upper left
+  gr = g.createLinearGradient(0, 0, 0, XH); gr.addColorStop(0, W(0.55)); gr.addColorStop(0.25, W(0.16)); gr.addColorStop(1, W(0.10)); g.strokeStyle = gr; g.lineWidth = 2.5; g.stroke();
   g.textBaseline = 'alphabetic'; g.textAlign = 'left';
-  g.fillStyle = '#8f98a8'; g.font = '600 19px system-ui, sans-serif'; g.fillText((lines[0] || '').toUpperCase(), 44, 52, XW - 220);
-  g.textAlign = 'right'; g.fillText(perf, XW - 44, 52); g.textAlign = 'left';
-  g.fillStyle = '#fff'; g.font = '500 50px Georgia, "Times New Roman", serif'; g.fillText(lines[1] || '', 42, 112, XW - 84);
-  g.fillStyle = '#ffa366'; g.font = '26px ui-monospace, Menlo, monospace'; g.fillText(lines[2] || '', 44, 156, XW - 88);
-  // the story of this moment, wrapped
-  g.fillStyle = '#d5dae3'; g.font = '25px system-ui, sans-serif';
-  const words = tr((STAGES[S.phase] || ['', ''])[1]).split(' '); let line = '', y = 204, n = 0;
+  g.fillStyle = W(0.5); g.font = F(600, 19); g.fillText((lines[0] || '').toUpperCase(), 52, 58, XW - 240);
+  g.textAlign = 'right'; g.font = F(500, 18); g.fillStyle = W(0.38); g.fillText(perf, XW - 52, 58); g.textAlign = 'left';
+  g.fillStyle = W(0.97); g.font = F(700, 48); g.fillText(lines[1] || '', 50, 116, XW - 100);
+  g.fillStyle = W(0.62); g.font = F(500, 26); g.fillText(lines[2] || '', 52, 158, XW - 104);
+  // the story of this moment, wrapped; or the controls
+  const words = tr((STAGES[S.phase] || ['', ''])[1]).split(' '); let line = '', y = 208, n = 0;
   if (xrHelp) {
-    XR_HELP.forEach(([k, t], i) => { g.fillStyle = '#ffa366'; g.font = '600 24px system-ui, sans-serif'; g.fillText(tr(k), 44, 204 + i * 33, 230); g.fillStyle = '#d5dae3'; g.font = '24px system-ui, sans-serif'; g.fillText(tr(t), 290, 204 + i * 33, XW - 334); });
+    XR_HELP.forEach(([k, t], i) => { g.fillStyle = W(0.95); g.font = F(600, 24); g.fillText(tr(k), 52, 208 + i * 33, 230); g.fillStyle = W(0.62); g.font = F(400, 24); g.fillText(tr(t), 298, 208 + i * 33, XW - 350); });
     n = 7; line = '';
   }
+  g.fillStyle = W(0.86); g.font = F(400, 25);
   for (let i = 0; i < words.length && n < 7; i++) {
     const t = line ? line + ' ' + words[i] : words[i];
-    if (g.measureText(t).width > XW - 88 && line) { g.fillText(n === 6 ? line.replace(/.{3}$/, '…') : line, 44, y); y += 34; n++; line = words[i]; } else line = t;
+    if (g.measureText(t).width > XW - 104 && line) { g.fillText(n === 6 ? line.replace(/.{3}$/, '…') : line, 52, y); y += 34; n++; line = words[i]; } else line = t;
   }
-  if (n < 7 && line) g.fillText(line, 44, y);
-  // the timeline: chapters as ticks, drag anywhere along it
-  const tHot = hot.includes('time'), X = p => TL.x + p * TL.w;
-  rr(TL.x, TL.y, TL.w, TL.h, 7); g.fillStyle = 'rgba(255,255,255,0.14)'; g.fill();
-  rr(TL.x, TL.y, Math.max(P * TL.w, 14), TL.h, 7); g.fillStyle = '#ffa366'; g.fill();
-  g.fillStyle = 'rgba(255,255,255,0.5)'; for (const [, p] of TICKS) g.fillRect(X(p) - 1, TL.y - 8, 2, 6);
-  g.font = '17px system-ui, sans-serif'; g.fillStyle = '#8f98a8'; g.textAlign = 'center';
-  for (const [p, t] of [[pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 day'], [pOfT(YEAR), '1 yr'], [pOfT(1e3 * YEAR), '1,000 yr']]) g.fillText(tr(t), X(p), TL.y + 40);
-  g.beginPath(); g.arc(X(P), TL.y + TL.h / 2, tHot ? 17 : 13, 0, 7); g.fillStyle = '#fff'; g.fill();
-  // buttons
+  if (n < 7 && line) g.fillText(line, 52, y);
+  // the timeline: a thin track, chapters as faint ticks, a white knob that grows under the pointer
+  const tHot = hot.includes('time'), X = p => TL.x + p * TL.w, ty = TL.y + 3, th = 8;
+  rr(TL.x, ty, TL.w, th, 4); g.fillStyle = W(0.16); g.fill();
+  rr(TL.x, ty, Math.max(P * TL.w, th), th, 4); g.fillStyle = W(0.92); g.fill();
+  g.fillStyle = W(0.32); for (const [, p] of TICKS) g.fillRect(X(p) - 1, ty - 9, 2, 5);
+  g.font = F(500, 17); g.fillStyle = W(0.45); g.textAlign = 'center';
+  for (const [p, t] of [[pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 day'], [pOfT(YEAR), '1 yr'], [pOfT(1e3 * YEAR), '1,000 yr']]) g.fillText(tr(t), X(p), TL.y + 42);
+  g.shadowColor = 'rgba(0,0,0,0.35)'; g.shadowBlur = 10; g.shadowOffsetY = 2;
+  g.beginPath(); g.arc(X(P), ty + th / 2, tHot ? 16 : 12, 0, 7); g.fillStyle = '#fff'; g.fill();
+  // buttons: pills of lighter glass; under the pointer they brighten, the chosen one is white with dark type
   for (const b of XB) {
-    const on = hot.includes(b.id) || (b.id === 'help' && xrHelp), main = b.id === 'play';
-    rr(b.x, b.y, b.w, b.h, 20); g.fillStyle = main ? (on ? '#ffb685' : '#ffa366') : on ? 'rgba(255,255,255,0.26)' : 'rgba(255,255,255,0.1)'; g.fill();
-    g.fillStyle = main ? '#16181d' : b.id === 'exit' ? '#ffb3a8' : '#fff'; g.font = `600 ${b.h > 70 ? 29 : 23}px system-ui, sans-serif`;
-    g.fillText(main ? (playing ? '❚❚  ' + tr('Pause') : '▶  ' + tr('Play')) : tr(b.label), b.x + b.w / 2, b.y + b.h / 2 + 10, b.w - 24);
+    const on = hot.includes(b.id), sel = b.id === 'play' || (b.id === 'help' && xrHelp);
+    g.shadowColor = on ? 'rgba(255,255,255,0.28)' : 'transparent'; g.shadowBlur = on ? 18 : 0; g.shadowOffsetY = 0;
+    rr(b.x, b.y, b.w, b.h, b.h / 2); g.fillStyle = sel ? W(on ? 1 : 0.92) : W(on ? 0.30 : 0.13); g.fill();
+    g.shadowColor = 'transparent';
+    if (!sel) { g.strokeStyle = W(on ? 0.4 : 0.14); g.lineWidth = 1.5; g.stroke(); }
+    g.fillStyle = sel ? 'rgba(28,30,36,0.96)' : b.id === 'exit' ? 'rgba(255,150,140,0.98)' : W(0.95); g.font = F(600, b.h > 70 ? 28 : 23);
+    g.fillText(b.id === 'play' ? (playing ? '❚❚  ' + tr('Pause') : '▶  ' + tr('Play')) : tr(b.label), b.x + b.w / 2, b.y + b.h / 2 + 9, b.w - 28);
   }
   g.textAlign = 'left'; xrTex.needsUpdate = true;
 }
