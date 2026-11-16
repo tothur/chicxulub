@@ -827,7 +827,7 @@ function columnAt(x, z) {
 
 // ---------- renderer ----------
 const stageEl = $('stage');
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: !/OculusBrowser|Quest/.test(navigator.userAgent), powerPreference: 'high-performance', logarithmicDepthBuffer: true });
 // quality: Auto adapts the resolution to the frame rate; High keeps full resolution; Low draws at 1x, without bloom
 const QUALITY = (() => { try { return localStorage.getItem('chicxulub.quality') || 'auto'; } catch (_) { return 'auto'; } })();
 const PR_MAX = QUALITY === 'low' ? 1 : Math.min(2, devicePixelRatio); let pr = QUALITY === 'auto' && SMALL ? Math.min(PR_MAX, 1.5) : PR_MAX;
@@ -3374,6 +3374,11 @@ addEventListener('keydown', e => {
 const rig = new THREE.Group(); scene.add(rig);
 let xrOn = false, xrPatched = false;
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
+// These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
+// So: a smaller eye buffer (0.7 = half the pixels), full foveation (coarser toward the edges), no multisampling on the
+// headset (see the renderer), and a viewport that shrinks further while frames come late and grows back when they do not.
+renderer.xr.setFramebufferScaleFactor(0.7); renderer.xr.setFoveation(1);
+let xrScale = 0.8, xrDt = 0.014, xrLast = 0, xrTune = 0;
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) document.body.appendChild(VRButton.createButton(renderer)); }).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
@@ -3382,7 +3387,8 @@ renderer.xr.addEventListener('sessionstart', () => {
     scene.traverse(o => { for (const m of [].concat(o.material || [])) if (m.isShaderMaterial && !m.isRawShaderMaterial && m.fragmentShader.includes('gl_FragColor') && !m.fragmentShader.includes('colorspace_fragment')) {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
-  xrOn = true;
+  renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
+  xrScale = 0.8; xrLast = 0; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3400,21 +3406,22 @@ const xrCtl = [0, 1].map(i => {
   c.addEventListener('disconnected', () => { c.userData.grab = false; });
   return c;
 });
-const xrCv = document.createElement('canvas'); xrCv.width = 512; xrCv.height = 320;
+const xrCv = document.createElement('canvas'); xrCv.width = 512; xrCv.height = 352;
 const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace;
-const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.125), new THREE.MeshBasicMaterial({ map: xrTex, transparent: true, toneMapped: false }));
+const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.1375), new THREE.MeshBasicMaterial({ map: xrTex, transparent: true, toneMapped: false }));
 xrPanel.position.set(0, 0.09, -0.04); xrPanel.rotation.x = -0.9;
 let xrText = '', xrTextT = 0;
 function xrDrawPanel(dt) {
   if ((xrTextT -= dt) > 0) return; xrTextT = 0.25;
   const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean).slice(0, 3);
-  const text = lines.join('|') + (playing ? '>' : '');
+  const perf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 70)}% resolution`;
+  const text = lines.join('|') + (playing ? '>' : '') + perf;
   if (text === xrText) return; xrText = text;
-  const g = xrCv.getContext('2d'); g.clearRect(0, 0, 512, 320); g.fillStyle = 'rgba(16,18,24,0.86)'; g.fillRect(0, 0, 512, 320);
+  const g = xrCv.getContext('2d'); g.clearRect(0, 0, 512, 352); g.fillStyle = 'rgba(16,18,24,0.86)'; g.fillRect(0, 0, 512, 352);
   g.fillStyle = '#fff'; g.font = '600 34px system-ui, sans-serif'; g.fillText(lines[1] || lines[0] || '', 20, 52, 472);
   g.fillStyle = '#ffb070'; g.font = '26px system-ui, sans-serif'; g.fillText((playing ? '▶ ' : '❚❚ ') + (lines[2] || ''), 20, 96, 472);
   g.fillStyle = '#b8c0cc'; g.font = '21px system-ui, sans-serif';
-  ['Grip: grab the world (two hands: stretch, turn)', 'Left stick: zoom, turn', 'Right stick: time ◀ ▶, zoom', 'Trigger: play / pause', 'A / X: next chapter · B / Y: back'].forEach((t, i) => g.fillText(t, 20, 146 + i * 36, 472));
+  ['Grip: grab the world (two hands: stretch, turn)', 'Left stick: zoom, turn', 'Right stick: time ◀ ▶, zoom', 'Trigger: play / pause', 'A / X: next chapter · B / Y: back', perf].forEach((t, i) => g.fillText(t, 20, 146 + i * 36, 472));
   xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
@@ -3422,6 +3429,12 @@ let xrBtn = 0;
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
   if (camera.parent === rig) { camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); }
   rig.updateMatrixWorld(true);
+  { // frame time (unclamped) -> viewport scale
+    const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
+    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 62 ? Math.max(0.35, xrScale * 0.85) : xrDt < 1 / 69 ? Math.min(1, xrScale * 1.05) : xrScale; }
+    const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
+    if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
+  }
   // grab: keep the world point that was in the hand (or between the hands) there
   const gr = xrCtl.filter(c => c.userData.grab);
   if (gr.length === 1) {
