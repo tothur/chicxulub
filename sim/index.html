@@ -3378,10 +3378,10 @@ if (location.search.includes('xrsim')) {          // development: an emulated Qu
 }
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
-// So: a smaller eye buffer (0.7 = half the pixels), full foveation (coarser toward the edges), no multisampling on the
+// So: a smaller eye buffer (0.8 = two thirds of the pixels), full foveation (coarser toward the edges), no multisampling on the
 // headset (see the renderer), and a viewport that shrinks further while frames come late and grows back when they do not.
-renderer.xr.setFramebufferScaleFactor(0.7); renderer.xr.setFoveation(1);
-let xrScale = 0.8, xrDt = 0.014, xrLast = 0, xrTune = 0;
+renderer.xr.setFramebufferScaleFactor(0.8); renderer.xr.setFoveation(1);
+let xrScale = 1, xrDt = 0.014, xrLast = 0, xrTune = 0;
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
   const tip = document.createElement('div'); tip.id = 'vrTip';
@@ -3398,7 +3398,7 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrOn = true;
+  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3488,7 +3488,7 @@ function xrDraw(dt) {
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.08;
   const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
   if (lines[3] && /\d/.test(lines[3])) lines[2] += '  ·  ' + lines[3];          // the age and the clock are separate lines on the page
-  const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = `${Math.round(1 / xrDt)} fps`;
+  const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`;
   const key = [lines[1], lines[2], playing, hot, Math.round(P * 2000), perf].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
@@ -3531,7 +3531,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   rig.updateMatrixWorld(true);
   { // frame time (unclamped) -> viewport scale
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
-    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 62 ? Math.max(0.35, xrScale * 0.85) : xrDt < 1 / 69 ? Math.min(1, xrScale * 1.05) : xrScale; }
+    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 45 ? Math.max(0.7, xrScale * 0.93) : xrDt < 1 / 66 ? Math.min(1, xrScale * 1.05) : xrScale; }          // sharpness first: shrink only below ~45 fps, gently, and never under 0.7 (text on the panel stays readable)
     const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
