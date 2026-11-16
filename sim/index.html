@@ -3402,7 +3402,7 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; rig.visible = true; xrOn = true;
+  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3452,9 +3452,16 @@ const TL = { x: 56, y: 452, w: XW - 112, h: 14 };
 const XB = [['prev', '◀  Chapter'], ['play', ''], ['next', 'Chapter  ▶'], ['earth', 'Whole Earth'], ['gulf', 'The Gulf'], ['crater', 'The crater'], ['help', 'Controls'], ['exit', 'Leave VR']]
   .map(([id, label], i) => i < 3 ? { id, label, x: 40 + i * 320, y: 508, w: 304, h: 76 } : { id, label, x: 40 + (i - 3) * 192, y: 604, w: 176, h: 68 });
 const _hp = new THREE.Vector3(), _hq = new THREE.Quaternion(), _xcam = new THREE.PerspectiveCamera();
-function xrSeat(pos, quat, dist) {          // put the rig so the head sees what a camera at pos / quat would, with the place looked at dist away shown at 1 m
-  const s = clamp(dist, 50, 4e7); rig.quaternion.copy(quat).multiply(_xq.copy(_hq).invert()); rig.scale.setScalar(s);
-  rig.position.copy(pos).sub(_xu.copy(_hp).multiplyScalar(s).applyQuaternion(rig.quaternion));
+let xrGo = null;          // a glide to a new view, in progress
+function xrSeat(pos, quat, dist) {          // glide the rig to where the head sees what a camera at pos / quat would, with the place looked at dist away shown at 1 m
+  const s1 = clamp(dist, 50, 4e7), q1 = new THREE.Quaternion().copy(quat).multiply(_xq.copy(_hq).invert());
+  xrGo = { p0: rig.position.clone(), q0: rig.quaternion.clone(), s0: rig.scale.x, p1: pos.clone().sub(_xu.copy(_hp).multiplyScalar(s1).applyQuaternion(q1)), q1, s1, t: 0 };
+}
+function xrGlide(dt) {                       // 0.8 s, eased; the scale moves by ratio and the position follows it, so the approach looks even
+  const o = xrGo; o.t = Math.min(1, o.t + dt / 0.8);
+  const k = o.t * o.t * (3 - 2 * o.t), sc = o.s0 * Math.pow(o.s1 / o.s0, k), f = Math.abs(o.s0 - o.s1) < 1e-6 * o.s0 ? 1 - k : (sc - o.s1) / (o.s0 - o.s1);
+  rig.position.copy(o.p1).addScaledVector(_xu.copy(o.p0).sub(o.p1), f); rig.quaternion.slerpQuaternions(o.q0, o.q1, k); rig.scale.setScalar(sc);
+  if (o.t >= 1) xrGo = null;
 }
 function xrView(h, tilt) {                   // look at the crater from h metres, tilt degrees off the vertical, from the south, north up
   const a = tilt * Math.PI / 180; _xcam.position.set(0, h * Math.cos(a), h * Math.sin(a)); _xcam.up.set(0, 0, -1); _xcam.lookAt(0, 0, 0);
@@ -3469,7 +3476,7 @@ function xrPress(c, hit) {
   const id = hit.id; buzz(c, 0.7, 18);
   if (id === 'time') { c.userData.drag = 'time'; return; }
   if (id === 'prev') chapter(-1); else if (id === 'next') chapter(1); else if (id === 'play') setPlaying(!playing);
-  else if (id === 'earth') xrView(2.6e7, 0); else if (id === 'gulf') xrView(3.4e6, 32); else if (id === 'crater') xrView(3.0e5, 46);
+  else if (id === 'earth') xrView(2.6e7, 0); else if (id === 'gulf') xrView(6.5e6, 26); else if (id === 'crater') xrView(3.0e5, 46);
   else if (id === 'help') xrHelp = !xrHelp;
   else if (id === 'exit') renderer.xr.getSession()?.end();
   xrKey = '';
@@ -3503,7 +3510,7 @@ function xrDraw(dt) {          // the look: a pane of frosted glass with a brigh
   const lines = xrLines;
   if ((xrPerfT -= 0.1) <= 0) { xrPerfT = 1; xrPerf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`; }          // once a second: every change redraws and re-uploads the panel
   const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = xrPerf;
-  const key = [lines[1], lines[2], playing, hot, pk, perf, xrHelp].join('|');
+  const key = [lines[1], lines[2], playing, hot, pk, xrHelp ? perf : '', xrHelp].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
   const W = a => `rgba(255,255,255,${a})`, F = (w, px) => `${w} ${px}px -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", sans-serif`;
@@ -3516,7 +3523,7 @@ function xrDraw(dt) {          // the look: a pane of frosted glass with a brigh
   gr = g.createLinearGradient(0, 0, 0, XH); gr.addColorStop(0, W(0.55)); gr.addColorStop(0.25, W(0.16)); gr.addColorStop(1, W(0.10)); g.strokeStyle = gr; g.lineWidth = 2.5; g.stroke();
   g.textBaseline = 'alphabetic'; g.textAlign = 'left';
   g.fillStyle = W(0.5); g.font = F(600, 19); g.fillText((lines[0] || '').toUpperCase(), 52, 58, XW - 240);
-  g.textAlign = 'right'; g.font = F(500, 18); g.fillStyle = W(0.38); g.fillText(perf, XW - 52, 58); g.textAlign = 'left';
+  if (xrHelp) { g.textAlign = 'right'; g.font = F(500, 18); g.fillStyle = W(0.38); g.fillText(perf, XW - 52, 58); g.textAlign = 'left'; }          // a diagnostic: with the controls, not the story
   g.fillStyle = W(0.97); g.font = F(700, 48); g.fillText(lines[1] || '', 50, 116, XW - 100);
   g.fillStyle = W(0.62); g.font = F(500, 26); g.fillText(lines[2] || '', 52, 158, XW - 104);
   // the story of this moment, wrapped; or the controls
@@ -3553,7 +3560,7 @@ function xrDraw(dt) {          // the look: a pane of frosted glass with a brigh
   g.textAlign = 'left'; xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
-let xrBtn = 0, xrPlace = true;
+let xrBtn = 0, xrPlace = true, xrAwake = 6;
 // Mesh detail in VR. The terrain meshes are flat grids that the vertex shaders shape from textures, drawn whole and once
 // per eye: at full density that was 7.4 million triangles a frame. Each one is swapped for a coarser grid while it is
 // small in view (about one cell per 2 mm at arm's length is as fine as the headset shows).
@@ -3580,6 +3587,11 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
   for (const c of xrCtl) xrPoint(c);
+  // the panel steps back while no one points at it (after a few seconds at the start), so it does not compete with the Earth
+  xrAwake = Math.max(0, xrAwake - dt);
+  const near = xrAwake > 0 || xrPanel.parent !== rig || xrCtl.some(c => c.userData.hit || c.userData.drag), pm = xrPanel.material;
+  pm.opacity += ((near ? 1 : 0.6) - pm.opacity) * Math.min(1, dt * 7);
+  if (xrGo) { if (xrCtl.some(c => c.userData.grab)) xrGo = null; else { xrGlide(dt); rig.updateMatrixWorld(true); } }
   // grab: keep the world point that was in the hand (or between the hands) there
   const gr = xrCtl.filter(c => c.userData.grab);
   if (gr.length === 1) {
@@ -3604,6 +3616,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   }
   const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld);          // the point 1 m in front of the head: what you are looking at
   if (zoom || turn || tilt) {
+    xrGo = null;
     const f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
     _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);
     _xq.multiply(_xr.setFromAxisAngle(_xu.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize(), -tilt * dt * 1.2));          // and about the head's left-right axis: stick forward rolls the top away
