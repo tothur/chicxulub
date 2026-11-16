@@ -551,7 +551,7 @@ const $ = id => document.getElementById(id);
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
 const mix = (a, b, t) => a + (b - a) * t;
-const SMALL = Math.min(innerWidth, innerHeight) < 700 || /Mobi|Android|iPhone|iPad/.test(navigator.userAgent);
+const SMALL = Math.min(innerWidth, innerHeight) < 700 || /Mobi|Android|iPhone|iPad|OculusBrowser|Quest/.test(navigator.userAgent);      // a headset has a phone's GPU, whatever its browser calls itself
 
 // ---------- data ----------
 let loaded = 0; const toLoad = 5;
@@ -827,7 +827,7 @@ function columnAt(x, z) {
 
 // ---------- renderer ----------
 const stageEl = $('stage');
-const renderer = new THREE.WebGLRenderer({ antialias: !/OculusBrowser|Quest/.test(navigator.userAgent), powerPreference: 'high-performance', logarithmicDepthBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
 // quality: Auto adapts the resolution to the frame rate; High keeps full resolution; Low draws at 1x, without bloom
 const QUALITY = (() => { try { return localStorage.getItem('chicxulub.quality') || 'auto'; } catch (_) { return 'auto'; } })();
 const PR_MAX = QUALITY === 'low' ? 1 : Math.min(2, devicePixelRatio); let pr = QUALITY === 'auto' && SMALL ? Math.min(PR_MAX, 1.5) : PR_MAX;
@@ -1919,7 +1919,7 @@ function updateFx() {
   // where it is, and how many pixels its 12 km would span from here
   const inFlight = t < 0.15, S_TOP = 100e3 / Math.sin(deg(60));
   _hd.set(DIR_IN.x * dist, sf0 * exag + DIR_IN.y * dist, DIR_IN.z * dist);          // true 60° path, not stretched by the relief exaggeration
-  const px = 2 * R_IMP / Math.max(camera.position.distanceTo(_hd), 1) / (2 * Math.tan(deg(camera.fov / 2))) * renderer.domElement.clientHeight;
+  const px = 2 * R_IMP / Math.max(camera.position.distanceTo(_hd), 1) * pxPerTan();
   star.visible = t < -0.5 && px < 5;
   if (star.visible) {
     star.position.copy(_hd);
@@ -2740,6 +2740,7 @@ async function loadPxQuiet(url) {
   const g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0);
   return { px: g.getImageData(0, 0, bmp.width, bmp.height).data, w: bmp.width };
 }
+let earthMesh = null;          // the globe, once built (VR swaps its geometry for coarser ones)
 function ensureGlobe() {
   if (globeReady) return globeReady;
   globeReady = (async () => {
@@ -2797,7 +2798,14 @@ void main() {
   // crater, where the triangles' straight edges would show, per pixel; blended in between, so no seam
   vec2 fxz = mix((qd > 0.0 ? q.xz / qd : vec2(0.0)) * th * R_EARTH, vFxz, smoothstep(0.4, 0.6, th));
   float gsd = gulfSD(fxz); if (length(vOp) < 1.0 && abs(gsd) < 150000.0) gsd = gulfSD(seaCrossXZ(vWp));   // seabed: as the Gulf's (seaCrossXZ)
-  if (gsd < 0.0) discard;                                 // the detailed Gulf and crater are drawn there
+  // The detailed Gulf and crater are drawn inside. The two meshes have different cell sizes, so their surfaces differ by
+  // up to kilometres where the relief is exaggerated, and seen at a slant an exact cut-over leaves slivers that neither
+  // draws (most visible in VR, looking along the ground with two eyes). So the globe carries on 60 km under the Gulf's
+  // edge, set slightly back in depth: the Gulf covers it wherever the Gulf draws, and it fills the slivers.
+  if (gsd < -60000.0) discard;
+  #if defined( USE_LOGDEPTHBUF ) && defined( USE_LOGDEPTHBUF_EXT )
+  if (gsd < 0.0) gl_FragDepthEXT += 2e-4;                 // about 0.4% further away
+  #endif
   vec3 n = normalize(cross(dFdx(vOp), dFdy(vOp))); if (dot(n, p) < 0.0) n = -n;
   // lit everywhere as the crater region is (sun from the south-east, 38 deg up): no fixed night side, since the Earth
   // turns under the Sun through the days and years shown
@@ -2836,7 +2844,7 @@ void main() {
   gl_FragColor = vec4(fogIt(col, vDist), 1.0);
 }`,
     }));
-    earth.matrixAutoUpdate = false; earth.matrix.copy(EARTH_M); earth.frustumCulled = false; scene.add(earth);
+    earth.matrixAutoUpdate = false; earth.matrix.copy(EARTH_M); earth.frustumCulled = false; scene.add(earth); earthMesh = earth;
     // the limb's glow (normal and view direction both in world space: in the globe's own frame it drew a band across the disc)
     const air = new THREE.Mesh(new THREE.SphereGeometry(1.035, 128, 64), new THREE.ShaderMaterial({
       uniforms: GU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
@@ -3371,15 +3379,15 @@ addEventListener('keydown', e => {
 // The camera rides in a rig placed where the desktop camera was and scaled so the point looked at is 1 m away: the
 // headset's metres become the rig's scale in the world, which gives stereo depth and head movement at any zoom.
 // No bloom or place labels in VR; the interface is the panel further down.
-const rig = new THREE.Group(); scene.add(rig);
+const rig = new THREE.Group(); rig.visible = false; scene.add(rig);          // holds the panel and pointers: shown only in VR
 let xrOn = false, xrPatched = false;
 if (location.search.includes('xrsim')) {          // development: an emulated Quest 3 (Meta's IWER) for browsers without a headset; drive it through window.__xr
   const { XRDevice, metaQuest3 } = await import('https://cdn.jsdelivr.net/npm/iwer@2.8.0/+esm'); window.__xr = new XRDevice(metaQuest3); window.__xr.installRuntime({ forceInstall: true });
 }
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
-// So: a smaller eye buffer (0.8 = two thirds of the pixels), full foveation (coarser toward the edges), no multisampling on the
-// headset (see the renderer), and a viewport that shrinks further while frames come late and grows back when they do not.
+// So: a smaller eye buffer (0.8 = two thirds of the pixels), full foveation (coarser toward the edges), meshes only as fine
+// as their size in view needs (xrLod), and a viewport that shrinks further while frames come late and grows back when they do not.
 renderer.xr.setFramebufferScaleFactor(0.8); renderer.xr.setFoveation(1);
 let xrScale = 1, xrDt = 0.014, xrLast = 0, xrTune = 0;
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
@@ -3394,14 +3402,15 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; xrOn = true;
+  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; rig.visible = true; xrOn = true;
 });
-renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
+renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
 // The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
 // there: sprite sizes, fades and the logarithmic depth all assume world metres. So just before each draw the eye cameras
 // are rewritten without the scale: same eye positions in the world, view space in world metres, depth range scaled to match.
-const _one = new THREE.Vector3(1, 1, 1); let xrNear = 1;
+const _one = new THREE.Vector3(1, 1, 1); let xrNear = 1, xrPxT = 800;
+function pxPerTan() { return xrOn ? xrPxT : renderer.domElement.clientHeight / (2 * Math.tan(deg(camera.fov / 2))); }          // pixels per unit of tangent across the view
 scene.onBeforeRender = (r, sc, cam) => {
   if (!xrOn || !cam.isArrayCamera) return;
   const s = rig.scale.x;
@@ -3409,7 +3418,7 @@ scene.onBeforeRender = (r, sc, cam) => {
     c.matrixWorld.decompose(_xu, _xq, _xs); c.matrixWorld.compose(_xu, _xq, _one); c.matrixWorldInverse.copy(c.matrixWorld).invert();
     c.projectionMatrix.elements[14] *= s; c.projectionMatrixInverse.copy(c.projectionMatrix).invert(); c.near = xrNear; c.far = 2e9;
   }
-  const e = cam.cameras[0]; if (e) ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2;          // pixels per unit of tangent, for sprite sizes
+  const e = cam.cameras[0]; if (e) { xrPxT = ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2; starU.uStarPx.value = clamp(e.viewport.w / 1400, 0.4, 1.5); }          // sprite sizes; stars sized for the eye buffer, not the page's pixel ratio
 };
 // ---- the interface in VR: a console panel floating in front of you, worked with a laser pointer from either hand ----
 // Point at it and pull the trigger to press a button or drag the timeline; hold the grip while pointing at it to carry it
@@ -3480,15 +3489,21 @@ function xrPoint(c) {                        // where this hand's ray meets the 
   d.hit = px > TL.x - 16 && px < TL.x + TL.w + 16 && py > TL.y - 34 && py < TL.y + 44 ? { id: 'time' } : XB.find(b => px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h) || { id: 'panel' };
   d.hot = d.hit.id; if (d.hot !== was && d.hot !== 'panel') buzz(c, 0.15, 6);
 }
+let xrPk = -1, xrLines = [], xrPerf = '', xrPerfT = 0;
 let xrKey = '', xrDrawT = 0, xrHelp = true;          // the controls are explained on the panel when VR starts; the Controls button switches back to the story
 const XR_HELP = [['Trigger', 'Press a button, drag the timeline'], ['Grip', 'Grab the world. Both hands: stretch and turn it'], ['Grip on the panel', 'Carry the panel somewhere else'],
   ['Left stick', 'Turn and tilt the Earth'], ['Right stick', 'Left / right: time.  Forward / back: zoom'], ['A or X', 'Play or pause'], ['B or Y', 'Bring this panel back in front of you']];
 function xrDraw(dt) {
-  if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.08;
-  const lines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
-  if (lines[3] && /\d/.test(lines[3])) lines[2] += '  ·  ' + lines[3];          // the age and the clock are separate lines on the page
-  const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`;
-  const key = [lines[1], lines[2], playing, hot, Math.round(P * 2000), perf, xrHelp].join('|');
+  if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.1;
+  const pk = Math.round(P * 2000);
+  if (pk !== xrPk) {          // reading the page's text makes the browser lay the page out: only when the time has moved
+    xrPk = pk; xrLines = (document.querySelector('.title')?.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+    if (xrLines[3] && /\d/.test(xrLines[3])) xrLines[2] += '  ·  ' + xrLines[3];          // the age and the clock are separate lines on the page
+  }
+  const lines = xrLines;
+  if ((xrPerfT -= 0.1) <= 0) { xrPerfT = 1; xrPerf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`; }          // once a second: every change redraws and re-uploads the panel
+  const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = xrPerf;
+  const key = [lines[1], lines[2], playing, hot, pk, perf, xrHelp].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
   g.clearRect(0, 0, XW, XH);
@@ -3529,6 +3544,22 @@ function xrDraw(dt) {
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
 let xrBtn = 0, xrPlace = true;
+// Mesh detail in VR. The terrain meshes are flat grids that the vertex shaders shape from textures, drawn whole and once
+// per eye: at full density that was 7.4 million triangles a frame. Each one is swapped for a coarser grid while it is
+// small in view (about one cell per 2 mm at arm's length is as fine as the headset shows).
+const xrLods = [[surf, 2 * HALF], [sea, 2 * HALF], [gulfMesh, 2 * GHALF], [gulfSea, 2 * GHALF]].map(([mesh, size]) =>
+  ({ mesh, size, base: mesh.geometry, max: Math.min(mesh.geometry.parameters.widthSegments, 320), cache: {}, make: n => new THREE.PlaneGeometry(size, size, n, n).rotateX(-Math.PI / 2) }));
+function xrLod(restore) {
+  if (earthMesh && !xrLods.some(l => l.mesh === earthMesh))
+    xrLods.push({ mesh: earthMesh, size: 2 * Math.PI * RE_M, base: earthMesh.geometry, max: earthMesh.geometry.parameters.widthSegments, cache: {}, make: n => new THREE.SphereGeometry(1, n, n / 2), earth: true });
+  const s = rig.scale.x;
+  for (const l of xrLods) {
+    let n = l.max;
+    if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
+    const g = restore ? l.base : n === l.base.parameters.widthSegments ? l.base : (l.cache[n] ||= l.make(n));
+    if (l.mesh.geometry !== g) l.mesh.geometry = g;
+  }
+}
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
   if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(); } }
   rig.updateMatrixWorld(true);
@@ -3568,12 +3599,12 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     _xq.multiply(_xr.setFromAxisAngle(_xu.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize(), -tilt * dt * 1.2));          // and about the head's left-right axis: stick forward rolls the top away
     rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
   }
+  xrLod(false);
   controls.target.copy(T);          // the app's own measures of distance (fog, near plane) follow the view, and the desktop view resumes from here
   if (time) { setPlaying(false); setP(P + time * dt * 0.04); }
   const hit = btn & ~xrBtn; xrBtn = btn;
   if (hit & 2) setPlaying(!playing);
   if (hit & 4) xrSummon();
-  xrDraw(dt);
 }
 function frame(now) {
   const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
@@ -3600,7 +3631,7 @@ function frame(now) {
   GLOBE_CAM.value.copy(camera.position).applyMatrix4(EARTH_INV);
   { const tc = scene.getObjectByName('todayCoast'); if (tc) tc.visible = showCoast && fk > 0.05; }
   camera.near = clamp(camera.position.distanceTo(controls.target) * 0.0005, 2, 400); camera.updateProjectionMatrix();
-  if (xrOn) { xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
+  if (xrOn) { xrDraw(dt); xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
   composer.render();
   updateLabels(); updateGlobeLabels(); declutter();
   updateNavUI(dt);
@@ -3611,5 +3642,5 @@ apply(P); updateModeHint();
 renderer.setAnimationLoop(frame);
 S0.set(0, 0, -60e3); enterGlobe(true).catch(() => $('loading').classList.add('done'));      // open on the globe; the loading screen stays up until it is ready
 setTimeout(() => { loadSky().then(() => loadTopo()).then(() => loadSWE()).then(() => loadCoast()).then(() => ensureFrames()).then(() => ensureClimate()).catch(() => {}); }, 1500);   // stream the rest after the first view      // the globe data also drive the sky glow, haze and frost in this view
-if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact };
+if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact, xr: { view: xrView, rig, lods: xrLods } };
 </script>
