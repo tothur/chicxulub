@@ -3386,7 +3386,7 @@ if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { i
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
   const tip = document.createElement('div'); tip.id = 'vrTip';
   tip.style.cssText = 'position:absolute;top:66px;left:50%;transform:translateX(-50%);z-index:999;max-width:min(92vw,560px);padding:6px 12px;border-radius:10px;background:rgba(16,18,24,.78);color:#cfd6e0;font:12px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none';
-  tip.textContent = 'In VR · Point at the panel and pull the trigger · Grip: grab the world (two hands: stretch, turn) · Left stick: zoom, turn · Right stick: time · A / X: play · B / Y: bring the panel back';
+  tip.textContent = 'In VR · Point at the panel and pull the trigger · Grip: grab the world (two hands: stretch, turn) · Left stick: turn, tilt · Right stick: time, zoom · A / X: play · B / Y: bring the panel back';
   document.body.append(b, tip);
   renderer.xr.addEventListener('sessionstart', () => { tip.hidden = true; });          // shown until VR has been entered once
 }).catch(() => {});
@@ -3418,7 +3418,7 @@ scene.onBeforeRender = (r, sc, cam) => {
 // ---- the interface in VR: a console panel floating in front of you, worked with a laser pointer from either hand ----
 // Point at it and pull the trigger to press a button or drag the timeline; hold the grip while pointing at it to carry it
 // somewhere else. Off the panel the grip grabs the world (one hand drags, two hands stretch and turn).
-// Sticks: left = zoom and turn, right = time and zoom. A / X: play or pause. B / Y: bring the panel back in front of you.
+// Sticks: left = turn (left/right) and tilt (forward/back), right = time (left/right) and zoom (forward/back). A / X: play or pause. B / Y: bring the panel back in front of you.
 const XW = 1024, XH = 704, PW = 0.5, PH = PW * XH / XW;
 const xrCv = document.createElement('canvas'); xrCv.width = XW; xrCv.height = XH;
 const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace; xrTex.anisotropy = 4;
@@ -3551,17 +3551,18 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   }
   for (const c of gr) c.userData.prev.copy(c.position);
   // sticks and buttons
-  let turn = 0, zoom = 0, time = 0, btn = 0; const dz = x => Math.abs(x || 0) > 0.2 ? x : 0;
+  let turn = 0, tilt = 0, zoom = 0, time = 0, btn = 0; const dz = x => Math.abs(x || 0) > 0.2 ? x : 0;
   for (const src of renderer.xr.getSession()?.inputSources || []) {
     const g = src.gamepad; if (!g) continue;
     const x = dz(g.axes[2]) || dz(g.axes[0]), y = dz(g.axes[3]) || dz(g.axes[1]);      // thumbstick, or a touchpad on other controllers
-    zoom += y; if (src.handedness === 'right') time += x; else turn += x;
+    if (src.handedness === 'right') { time += x; zoom += y; } else { turn += x; tilt += y; }
     if (g.buttons[4]?.pressed) btn |= 2; if (g.buttons[5]?.pressed) btn |= 4;
   }
   const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld);          // the point 1 m in front of the head: what you are looking at
-  if (zoom || turn) {
+  if (zoom || turn || tilt) {
     const f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
     _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);
+    _xq.multiply(_xr.setFromAxisAngle(_xu.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize(), -tilt * dt * 1.2));          // and about the head's left-right axis: stick forward rolls the top away
     rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
   }
   controls.target.copy(T);          // the app's own measures of distance (fog, near plane) follow the view, and the desktop view resumes from here
