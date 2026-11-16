@@ -2611,9 +2611,7 @@ const LABELS = [
   { text: 'Terraced rim', kind: 'phase', at: I => I.t > 450 ? along(78000, 800) : null },
 ].map(L => { const el = document.createElement('div'); el.className = 'label ' + L.kind; el.textContent = tr(L.text); document.body.appendChild(el); return { ...L, el, lift: L.kind === 'impact' ? 1200 : 400 }; });
 const v3 = new THREE.Vector3();
-function updateLabels() {
-  const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight, I = S.imp;
-  for (const L of LABELS) {
+function labelWorld(L, I) {          // is this label shown now? Leaves its place in the world in v3 (and keeps its text current)
     let vis;
     if (L.at) {
       const p = (L.textOf || camera.position.distanceTo(controls.target) < 900e3) && L.at(I); vis = !!p;
@@ -2628,6 +2626,12 @@ function updateLabels() {
       bendV(L.x, (L.kind === 'water' ? 0 : Math.max(0, gulfAt(L.x, L.z)[0]) + 4000) * exag, L.z, v3);
     }
     else { vis = (!L.when || L.when(I)) && kept(L.x, L.z); bendV(L.x, (groundTop(L.x, L.z) + L.lift) * exag, L.z, v3); }
+    return vis;
+}
+function updateLabels() {
+  const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight, I = S.imp;
+  for (const L of LABELS) {
+    let vis = labelWorld(L, I);
     v3.project(camera);
     vis = vis && v3.z < 1 && Math.abs(v3.x) < 1.05 && Math.abs(v3.y) < 1.05;
     L.el.style.opacity = vis ? 1 : 0; L._vis = vis; L._x = (v3.x * 0.5 + 0.5) * w; L._y = (-v3.y * 0.5 + 0.5) * h;
@@ -3386,10 +3390,10 @@ if (location.search.includes('xrsim')) {          // development: an emulated Qu
 }
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
-// So: a smaller eye buffer (0.8 = two thirds of the pixels), full foveation (coarser toward the edges), meshes only as fine
+// So: full foveation (coarser toward the edges), meshes only as fine
 // as their size in view needs (xrLod), and a viewport that shrinks further while frames come late and grows back when they do not.
-renderer.xr.setFramebufferScaleFactor(0.8); renderer.xr.setFoveation(1);
-let xrScale = 1, xrDt = 0.014, xrLast = 0, xrTune = 0;
+renderer.xr.setFramebufferScaleFactor(1); renderer.xr.setFoveation(1);
+let xrScale = 0.8, xrDt = 0.014, xrLast = 0, xrTune = 0;
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
   document.body.append(b);
@@ -3402,9 +3406,9 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 1; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = true; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
 });
-renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
+renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; for (const t of xrTags.values()) { t.a = 0; t.sp.visible = false; } xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
 // The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
 // there: sprite sizes, fades and the logarithmic depth all assume world metres. So just before each draw the eye cameras
@@ -3425,7 +3429,8 @@ scene.onBeforeRender = (r, sc, cam) => {
 // somewhere else. Off the panel the grip grabs the world (one hand drags, two hands stretch and turn).
 // Sticks: left = turn (left/right) and tilt (forward/back), right = time (left/right) and zoom (forward/back). A / X: play or pause. B / Y: bring the panel back in front of you.
 const XW = 1024, XH = 704, PW = 0.5, PH = PW * XH / XW;
-const xrCv = document.createElement('canvas'); xrCv.width = XW; xrCv.height = XH;
+const XK = 1.5;          // the panel is drawn at 1.5x: sharp when you lean in
+const xrCv = document.createElement('canvas'); xrCv.width = XW * XK; xrCv.height = XH * XK;
 const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace; xrTex.anisotropy = 4;
 const xrUi = o => Object.assign(o, { transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false });   // drawn last, over the world
 const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBasicMaterial(xrUi({ map: xrTex })));
@@ -3508,13 +3513,13 @@ function xrDraw(dt) {          // the look: a pane of frosted glass with a brigh
     if (xrLines[3] && /\d/.test(xrLines[3])) xrLines[2] += '  ·  ' + xrLines[3];          // the age and the clock are separate lines on the page
   }
   const lines = xrLines;
-  if ((xrPerfT -= 0.1) <= 0) { xrPerfT = 1; xrPerf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 80)}%`; }          // once a second: every change redraws and re-uploads the panel
+  if ((xrPerfT -= 0.1) <= 0) { xrPerfT = 1; xrPerf = `${Math.round(1 / xrDt)} fps · ${Math.round(xrScale * 100)}%`; }          // once a second: every change redraws and re-uploads the panel
   const hot = xrCtl.map(c => c.userData.hit?.id || '').join(), perf = xrPerf;
   const key = [lines[1], lines[2], playing, hot, pk, xrHelp ? perf : '', xrHelp].join('|');
   if (key === xrKey) return; xrKey = key;
   const g = xrCv.getContext('2d'), rr = (x, y, w, h, r) => { g.beginPath(); g.roundRect(x, y, w, h, r); };
   const W = a => `rgba(255,255,255,${a})`, F = (w, px) => `${w} ${px}px -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", sans-serif`;
-  g.clearRect(0, 0, XW, XH); g.shadowColor = 'transparent';
+  g.setTransform(XK, 0, 0, XK, 0, 0); g.clearRect(0, 0, XW, XH); g.shadowColor = 'transparent';
   // glass: a dim, slightly cool body, lighter toward the top, with a rim that catches the light at the top edge
   rr(3, 3, XW - 6, XH - 6, 56);
   let gr = g.createLinearGradient(0, 0, 0, XH); gr.addColorStop(0, 'rgba(92,96,106,0.80)'); gr.addColorStop(0.5, 'rgba(58,61,70,0.80)'); gr.addColorStop(1, 'rgba(44,46,54,0.84)');
@@ -3560,6 +3565,50 @@ function xrDraw(dt) {          // the look: a pane of frosted glass with a brigh
   g.textAlign = 'left'; xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
+// ---- place names in VR: the page's labels (towns, fossil sites, oceans, the crater's parts) as small glass tags that
+// face you and keep their size in view. Which ones exist and when is the page's own logic (labelWorld, the stylesheet);
+// here they are thinned by rank so no two sit within a few degrees of each other.
+const xrTags = new Map(); let xrCssT = 0;
+function xrTag(L, text) {
+  const c = document.createElement('canvas'), g = c.getContext('2d'), f = '600 30px -apple-system, "SF Pro Text", system-ui, sans-serif';
+  g.font = f; const w = Math.ceil(g.measureText(text).width) + 44; c.width = w; c.height = 76;
+  g.font = f; g.beginPath(); g.roundRect(2, 2, w - 4, 50, 25); g.fillStyle = 'rgba(46,49,58,0.74)'; g.fill(); g.strokeStyle = 'rgba(255,255,255,0.3)'; g.lineWidth = 1.5; g.stroke();
+  g.fillStyle = 'rgba(255,255,255,0.96)'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, w / 2, 28);
+  g.beginPath(); g.arc(w / 2, 66, 6, 0, 7); g.fillStyle = '#fff'; g.fill(); g.strokeStyle = 'rgba(0,0,0,0.45)'; g.lineWidth = 2; g.stroke();          // the place itself
+  const map = new THREE.CanvasTexture(c); map.colorSpace = THREE.SRGBColorSpace;
+  let e = xrTags.get(L);
+  if (!e) { e = { sp: new THREE.Sprite(new THREE.SpriteMaterial(xrUi({ map, opacity: 0 }))), a: 0, w: new THREE.Vector3() }; e.sp.center.set(0.5, 10 / 76); e.sp.renderOrder = 900; e.sp.frustumCulled = false; scene.add(e.sp); xrTags.set(L, e); }
+  else { e.sp.material.map.dispose(); e.sp.material.map = map; }
+  e.text = text; e.asp = w / 76; return e;
+}
+function xrLabels(dt) {
+  const I = S.imp, cam = camera.position, all = [...LABELS, ...GLABELS];
+  if ((xrCssT -= dt) <= 0) { xrCssT = 0.5; for (const L of all) L._css = L.el.offsetWidth > 0; }          // what the stylesheet shows in this mode (asks the page for layout: twice a second)
+  const cand = [];
+  for (const L of all) {
+    let ok = L._css; const e = xrTags.get(L);
+    if (ok && !L.v) ok = labelWorld(L, I);
+    if (ok) {
+      const w = L.v || v3, text = L.el.textContent;
+      ok = !!text && _xa.copy(w).sub(EC).dot(_xb.copy(cam).sub(w)) > 0;                                     // on this side of the Earth
+      if (ok) { const t = e && e.text === text ? e : xrTag(L, text); t.w.copy(w); cand.push([L, t]); }
+    }
+    if (e) e.on = false;
+  }
+  cand.sort((a, b) => (LABEL_RANK[a[0].kind] ?? 3) - (LABEL_RANK[b[0].kind] ?? 3) || b[1].a - a[1].a);        // by rank; among equals, the ones already showing stay
+  const dirs = [];
+  for (const [, t] of cand) {
+    if (dirs.length >= 26) break;
+    const d = new THREE.Vector3().copy(t.w).sub(cam).normalize();
+    if (dirs.some(o => o.dot(d) > 0.9972)) continue;                                                        // within ~4.3 degrees of one already placed
+    dirs.push(d); t.on = true;
+  }
+  for (const t of xrTags.values()) {
+    t.a += ((t.on ? 1 : 0) - t.a) * Math.min(1, dt * 8); t.sp.visible = t.a > 0.02; if (!t.sp.visible) continue;
+    const h = t.w.distanceTo(cam) * 0.04; t.sp.position.copy(t.w); t.sp.scale.set(h * t.asp, h, 1); t.sp.material.opacity = t.a;
+  }
+}
+
 let xrBtn = 0, xrPlace = true, xrAwake = 6;
 // Mesh detail in VR. The terrain meshes are flat grids that the vertex shaders shape from textures, drawn whole and once
 // per eye: at full density that was 7.4 million triangles a frame. Each one is swapped for a coarser grid while it is
@@ -3582,7 +3631,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   rig.updateMatrixWorld(true);
   { // frame time (unclamped) -> viewport scale
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
-    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 45 ? Math.max(0.7, xrScale * 0.93) : xrDt < 1 / 66 ? Math.min(1, xrScale * 1.05) : xrScale; }          // sharpness first: shrink only below ~45 fps, gently, and never under 0.7 (text on the panel stays readable)
+    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 45 ? Math.max(0.56, xrScale * 0.93) : xrDt < 1 / 66 ? Math.min(1, xrScale * 1.05) : xrScale; }          // sharpness first: shrink only below ~45 fps, gently, and never under 0.56 of the headset's own resolution (text on the panel stays readable); at 1 it is the full eye buffer
     const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
@@ -3654,7 +3703,7 @@ function frame(now) {
   GLOBE_CAM.value.copy(camera.position).applyMatrix4(EARTH_INV);
   { const tc = scene.getObjectByName('todayCoast'); if (tc) tc.visible = showCoast && fk > 0.05; }
   camera.near = clamp(camera.position.distanceTo(controls.target) * 0.0005, 2, 400); camera.updateProjectionMatrix();
-  if (xrOn) { xrDraw(dt); xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
+  if (xrOn) { xrDraw(dt); xrLabels(dt); xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
   composer.render();
   updateLabels(); updateGlobeLabels(); declutter();
   updateNavUI(dt);
