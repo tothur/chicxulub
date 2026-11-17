@@ -322,7 +322,7 @@ v33 (2026-10-27): fossil sites and K-Pg boundary sections.
   by pygplates (added to requirements.txt). The GPlates Web Service was down (503); the local reconstruction reproduces
   its cached results for the crater and the towns to 0.0001 deg. Writes meta.sites with each site's record in a few
   sentences, its references, its setting then (land/sea) and the PaleoDEM height under its 66 Ma position.
-- The map and the rocks disagree at nine of the twelve marine sites: the PaleoDEM has land under them (Brazos River,
+- The map and the rocks disagree at nine of the thirteen marine sites: the PaleoDEM has land under them (Brazos River,
   Zumaia, El Kef, Maastricht, Woodside Creek; Gubbio, Stevns Klint, El Mimbral and Beloc with sea within 30 km).
   PALEOMAP's coastlines are approximate. Markers stay at the reconstructed positions; the viewer's card says so.
 - Viewer: site labels (diamonds = boundary sections, circles = fossil sites) on the globe and close up; click one for
