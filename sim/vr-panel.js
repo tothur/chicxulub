@@ -1,27 +1,31 @@
-// Coordinates are shared by the canvas and controller hit testing, independent of texture resolution.
-export const XW = 1024, XH = 704;
-export const TL = { x: 50, y: 421, w: 924 };
+// Physical widths are metres. Canvas coordinates are also the ray targets.
+export const XW = 800;
+export const surfaces = {
+  guide: { height: 470, width: 0.50, yaw: -42, lift: -0.08 },
+  controls: { height: 400, width: 0.45, yaw: 42, lift: -0.08 },
+  timeline: { height: 132, width: 0.69, yaw: 0, lift: 0.40 },
+};
+export const TL = { x: 38, y: 79, w: 724 };
 const buttons = [
-  ['en', 'English', 374, 20, 119, 62], ['hu', 'Magyar', 497, 20, 119, 62],
-  ['help', 'Controls', 638, 20, 172, 62], ['exit', 'Leave VR', 824, 20, 158, 62],
-  ['prev', 'Previous chapter', 42, 471, 288, 74], ['play', 'Play', 344, 471, 336, 74], ['next', 'Next chapter', 694, 471, 288, 74],
-  ['crater', 'Crater', 42, 605, 304, 74], ['gulf', 'Gulf of Mexico', 360, 605, 304, 74], ['earth', 'Whole Earth', 678, 605, 304, 74],
-].map(([id, label, x, y, w, h]) => ({ id, label, x, y, w, h }));
-export function panelHit(x, y) {
-  if (x >= TL.x - 16 && x <= TL.x + TL.w + 16 && Math.abs(y - TL.y) <= 40) return 'time';
-  return buttons.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h)?.id || 'panel';
+  ['guide','help','Controls',535,18,229,58],
+  ['controls','crater','Crater',28,79,238,112], ['controls','gulf','Gulf of Mexico',281,79,238,112], ['controls','earth','Whole Earth',534,79,238,112],
+  ['controls','prev','Previous chapter',28,205,215,74], ['controls','play','Play',254,205,292,74], ['controls','next','Next chapter',557,205,215,74],
+  ['controls','en','English',28,316,164,58], ['controls','hu','Magyar',202,316,164,58], ['controls','exit','Leave VR',568,316,204,58],
+].map(([surface,id,label,x,y,w,h])=>({surface,id,label,x,y,w,h}));
+export function panelHit(surface,x,y) {
+  if (surface === 'timeline' && Math.abs(y-TL.y)<=36 && x>=TL.x-16 && x<=TL.x+TL.w+16) return 'time';
+  return buttons.find(b=>b.surface===surface && x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h)?.id || 'panel';
 }
-
 const helpRows = [
   ['Trigger', 'Select or drag the timeline'], ['Left stick', 'Turn and tilt the Earth'],
   ['Grip', 'Move the world or the panel'], ['Right stick', 'Across for time, up/down for zoom'],
   ['Both grips', 'Resize and rotate the world'], ['A / X', 'Play or pause'],
-  ['B / Y', 'Bring the panel back'],
+  ['B / Y', 'Recenter panels'],
 ];
 const pinchHelp = [
   ['Point and pinch', 'Select or drag the timeline'], ['Pinch the panel background', 'Move the panel'],
   ['Pinch outside the panel', 'Move the world'], ['Pinch with both hands', 'Resize and rotate the world'],
-  ['Double pinch in the air', 'Bring the panel back'],
+  ['Double pinch in the air', 'Recenter panels'],
 ];
 const ink = '#f4f3eb', muted = '#b9c9c8', sea = '#9bded3', gold = '#ffc476';
 const font = (weight, size) => weight + ' ' + size + 'px Roboto, system-ui, sans-serif';
@@ -40,6 +44,28 @@ function icon(g, id, x, y, color) {
   g.stroke(); g.restore();
 }
 
+// Three silhouettes show the change of scale before the user selects a view.
+function viewGlyph(g,id,x,y,color) {
+  g.save(); g.translate(x,y); g.lineWidth=2; g.strokeStyle=color;
+  if(id==='earth') {
+    g.rotate(-0.24);
+    for(const rx of [9,21]) { g.beginPath(); g.ellipse(0,0,rx,21,0,0,Math.PI*2); g.stroke(); }
+    for(const v of [-9,9]) { g.beginPath(); g.ellipse(0,v,18,4,0,0,Math.PI*2); g.stroke(); }
+  } else if(id==='crater') {
+    for(const [rx,ry,cy] of [[43,13,4],[33,10,1],[21,6,0],[8,3,-1]]) {
+      g.beginPath(); g.ellipse(0,cy,rx,ry,-0.15,0,Math.PI*2); g.stroke();
+    }
+  } else {
+    // Nested coast and shelf contours.
+    for(let i=0;i<4;i++) {
+      g.beginPath(); g.moveTo(-46,10-i*6);
+      g.bezierCurveTo(-27,17-i*6,-20,-15-i*3,-3,-8-i*4);
+      g.bezierCurveTo(17,0-i*4,17,21-i*5,46,2-i*4); g.stroke();
+    }
+  }
+  g.restore();
+}
+
 function storyLines(g, text, size) {
   g.font = font(400,size);
   const lines = []; let line = '';
@@ -51,7 +77,7 @@ function storyLines(g, text, size) {
   return lines;
 }
 
-export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
+export function makePanelPainter(surface, canvas, tr, chapterTicks, landmarks) {
   const g = canvas.getContext('2d');
   const storyCache = new Map();
   const box = (x,y,w,h,r,fill,stroke) => {
@@ -62,46 +88,49 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
     g.font = font(weight,size); g.fillStyle = color; g.textAlign = align;
     if (width === undefined) g.fillText(s,x,y); else g.fillText(s,x,y,width);
   };
+  const XH = surfaces[surface].height;
   const shell = g.createLinearGradient(0,0,XW,XH);
-  shell.addColorStop(0,'#20393e'); shell.addColorStop(0.58,'#14272d'); shell.addColorStop(1,'#102328');
+  shell.addColorStop(0,'#1e3942'); shell.addColorStop(0.55,'#122932'); shell.addColorStop(1,'#0c1c25');
   return ({ hands, lang, preset, title, story, clock, p, playing, help, perf, hover, pressed }) => {
-    g.setTransform(canvas.width / XW, 0, 0, canvas.height / XH, 0, 0); g.clearRect(0,0,XW,XH);
-    g.textBaseline = 'middle';
-    box(2,2,XW-4,XH-4,30,shell,'#637e81');
-    box(42,29,45,45,13,'#294c50');
-    icon(g,'crater',65,51,sea); text('Chicxulub',100,51,32,ink,650);
-    box(369,15,252,72,20,'#112429');
-    g.fillStyle = '#425455'; g.fillRect(42,94,940,1);
-    text(help ? tr(hands ? 'Hand tracking' : 'Hand controls') : title,44,133,42,ink,650,'left',930);
-    if (help) {
-      (hands ? pinchHelp : helpRows).forEach(([input,action],i) => {
-        const x = 46 + (i % 2) * 481, y = 174 + Math.floor(i/2)*52;
-        text(tr(input),x,y,19,sea,650); text(tr(action),x,y+24,23,ink,450,'left',452);
-      });
-      text(perf,966,353,18,muted,500,'right');
-    } else {
-      if (!storyCache.has(story)) {
-        let size = 25, lines = storyLines(g,story,size);
-        while (size > 18 && lines.length * (size+5) > 205) lines = storyLines(g,story,--size);
-        storyCache.set(story,{size,lines});
-      }
-      const {size,lines} = storyCache.get(story);
-      lines.forEach((line,i) => text(line,46,181+i*(size+5),size,muted,400));
+    g.setTransform(canvas.width/XW,0,0,canvas.height/XH,0,0); g.clearRect(0,0,XW,XH); g.textBaseline='middle';
+    box(2,2,XW-4,XH-4,26,shell,'#66858b');
+    if (surface==='timeline') {
+      text(tr('Time'),38,35,25,sea,600); text(clock,762,35,30,ink,650,'right',625);
+      box(TL.x,TL.y-3,TL.w,6,3,'#50636a');
+      if(p>0) box(TL.x,TL.y-3,p*TL.w,6,3,gold);
+      g.fillStyle='#607378'; for(let i=0;i<=80;i++) g.fillRect(TL.x+i*TL.w/80,TL.y+7,1,i%5===0?7:3);
+      g.fillStyle=muted; for(const tick of chapterTicks) g.fillRect(TL.x+tick*TL.w,TL.y-12,2,6);
+      for(const [v,label] of landmarks) text(tr(label),TL.x+v*TL.w,109,18,muted,500,v===0?'left':v===1?'right':'center');
+      g.beginPath(); g.arc(TL.x+p*TL.w,TL.y,hover.includes('time')?12:9,0,2*Math.PI);
+      g.fillStyle=pressed.includes('time')?ink:gold; g.fill(); return;
     }
-
-    box(24,373,976,186,20,'#0e1b1e');
-    text(tr('Time'),50,392,21,muted); text(clock,974,392,24,gold,600,'right',790);
-    box(TL.x,TL.y-4,TL.w,8,4,'#536361');
-    if (p > 0) box(TL.x,TL.y-4,TL.w*p,8,4,gold);
-    g.fillStyle = '#b2bdb7'; for (const tick of chapterTicks) g.fillRect(TL.x+TL.w*tick,TL.y-9,2,5);
-    for (const [position,label] of landmarks) text(tr(label),TL.x+TL.w*position,449,19,muted,500,position===0?'left':position===1?'right':'center');
-    g.beginPath(); g.arc(TL.x+p*TL.w,TL.y,hover.includes('time')?13:10,0,2*Math.PI);
-    g.fillStyle = pressed.includes('time') ? ink : gold; g.fill(); g.lineWidth=2; g.strokeStyle='#142020'; g.stroke();
-
-    text(tr('Views'),44,584,24,ink,600);
-    g.fillStyle = '#425b60'; g.fillRect(166,584,356,1);
-    text(tr(hands ? 'Point and pinch to select' : 'Point and press the trigger'),978,584,20,muted,450,'right');
+    if(surface==='guide') {
+      icon(g,'crater',53,48,gold); text('Chicxulub',84,48,27,sea,600);
+      g.fillStyle='#45616a'; g.fillRect(38,92,724,1);
+      g.font='500 48px Georgia, serif'; g.textAlign='left'; g.fillStyle=ink;
+      g.fillText(help?tr(hands?'Hand tracking':'Controllers'):title,38,139,724);
+      if(help) {
+        (hands?pinchHelp:helpRows).forEach(([input,action],i)=>{
+          const x=38+(i%2)*370,y=192+Math.floor(i/2)*64;
+          text(tr(input),x,y,21,sea,600,'left',342); text(tr(action),x,y+26,23,ink,450,'left',342);
+        });
+        text(perf,760,440,18,muted,500,'right');
+      } else {
+        if(!storyCache.has(story)){
+          let size=30,lines=storyLines(g,story,size);
+          while(lines.length*(size+7)>258 && size>16) lines=storyLines(g,story,--size);
+          storyCache.set(story,{size,lines});
+        }
+        const {size,lines}=storyCache.get(story);
+        lines.forEach((line,i)=>text(line,40,195+i*(size+7),size,ink,400));
+      }
+    } else {
+      text(tr('Views'),32,43,33,ink,650);
+      text(tr(hands?'Point and pinch to select':'Point and press the trigger'),765,43,20,muted,500,'right',510);
+      g.fillStyle='#45616a'; g.fillRect(30,298,740,1);
+    }
     for (const b of buttons) {
+      if (b.surface !== surface) continue;
       const hot = hover.includes(b.id), down = pressed.includes(b.id), primary = b.id === 'play';
       const language = b.id === 'en' || b.id === 'hu';
       const selected = b.id === lang || b.id === preset;
@@ -110,7 +139,10 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
       const cy = b.y + b.h/2, cx = b.x + b.w/2, color = selected && !down ? '#102c2d' : primary ? '#241d12' : ink;
       const label = tr(b.id === 'play' && playing ? 'Pause' : b.id === 'help' && help ? 'Back to story' : b.label);
       const symbol = b.id === 'play' && playing ? 'pause' : b.id;
-      if (language || b.id === 'exit' || b.id === 'help') text(label,cx,cy,23,color,550,'center',b.w-16);
+      if (['crater','gulf','earth'].includes(b.id)) {
+        viewGlyph(g,b.id,cx,cy-19,selected?color:sea);
+        text(label,cx,cy+25,26,color,600,'center',b.w-20);
+      } else if (language || b.id === 'exit' || b.id === 'help') text(label,cx,cy,23,color,550,'center',b.w-16);
       else {
         const size = primary ? 30 : 26;
         g.font = font(600,size);

@@ -915,8 +915,8 @@ function unbendV(v) {                     // world -> flat map: x, height above 
 }
 const bendA = a => bendV(a.x, a.y, a.z);
 const GU = {
-  tGE: { value: null }, tGF: { value: null }, uT: { value: -1e9 }, uGEx: { value: 25 },
-  uGF: { value: new THREE.Vector4(1e12, GLB.frames.dt, GLB.frames.n, GLB.w.eta_max) },     // x: the start, once the frames are in
+  tGE: { value: null }, tGF: { value: null }, uT: { value: -1e9 }, uGEx: { value: 25 }, uOrbit: { value: 0 },
+  uWaveMix: { value: new THREE.Vector2() }, // interpolation fraction and residual wave amplitude
   uSunG: { value: sunDir.clone().applyMatrix3(GM_INV3) }, uImp: { value: IMPV },
   uGM: { value: new THREE.Matrix3().setFromMatrix4(GM_ROT) }, uFrW: { value: new THREE.Vector4(4000, 0, 0, 0) },
   uFrG: { value: new THREE.Vector4(-1, -1, -1, -1) }, uFrGK: { value: new THREE.Vector4() },
@@ -939,26 +939,19 @@ vec3 landAlb(vec2 uv, float h) {
   if (uLC > 0.5) return texture2D(tLC, uv).rgb;
   return mix(mix(vec3(0.36, 0.38, 0.26), vec3(0.5, 0.43, 0.32), smoothstep(150.0, 1400.0, h)), vec3(0.6, 0.58, 0.56), smoothstep(2400.0, 4000.0, h)) * 0.8;
 }
-uniform sampler2D tGE; uniform highp sampler2DArray tGF; uniform vec4 uGF; uniform float uT, uGEx; uniform vec3 uSunG, uImp;
+uniform sampler2D tGE; uniform sampler2D tGF; uniform vec2 uWaveMix; uniform float uT, uGEx; uniform vec3 uSunG, uImp;
 vec2 llOf(vec3 p) { return vec2(atan(-p.z, p.x), asin(clamp(p.y, -1.0, 1.0))); }          // longitude, latitude (rad)
 vec2 uvOf(vec2 l) { return vec2(l.x / 6.2831853 + 0.5, 0.5 - l.y / 3.1415927); }
-// one frame of the global simulation, wet-weighted bilinear, wrapping in longitude
-vec2 gFrame(vec2 uv, int layer) {
-  vec2 p = uv * vec2(${GTW}.0, ${GTH}.0) - 0.5; ivec2 i0 = ivec2(floor(p)); vec2 f = p - floor(p);
-  float sw = 0.0, se = 0.0;
-  for (int k = 0; k < 4; k++) {
-    ivec2 o = ivec2(k & 1, k >> 1), q = i0 + o;
-    q.x = q.x < 0 ? q.x + ${GTW} : (q.x >= ${GTW} ? q.x - ${GTW} : q.x); q.y = clamp(q.y, 0, ${GTH - 1});
-    float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
-    float c = texelFetch(tGF, ivec3(q, layer), 0).r * 255.0;
-    if (c > 0.5) { float a = (c - 128.0) / 127.0; sw += w; se += w * sign(a) * a * a * uGF.w; }
-  }
-  return vec2(sw > 0.0 ? se / sw : 0.0, sw);
+// Two adjacent decoded frames share a texture. Filter height and wet share together,
+// then divide out dry neighbours so the shoreline does not damp the wave.
+float gFrame(vec2 uv, float slot) {
+  float v = clamp(uv.y, 0.5 / ${GTH}.0, 1.0 - 0.5 / ${GTH}.0);
+  vec2 h = texture2D(tGF, vec2(uv.x, (v + slot) * 0.5)).rg;
+  return h.y > 0.0 ? h.x / h.y : 0.0;
 }
 float gEta(vec2 uv) {
-  if (uT < uGF.x || uT > uGF.x + (uGF.z + 260.0) * uGF.y) return 0.0;      // before, or days after the run: calm
-  float fr = clamp((uT - uGF.x) / uGF.y, 0.0, uGF.z - 1.0), l0 = floor(fr);
-  return mix(gFrame(uv, int(l0)).x, gFrame(uv, int(min(l0 + 1.0, uGF.z - 1.0))).x, fr - l0) * exp(-max(uT - uGF.x - (uGF.z - 1.0) * uGF.y, 0.0) / 43200.0);
+  if (uWaveMix.y <= 0.0) return 0.0;
+  return mix(gFrame(uv, 0.0), gFrame(uv, 1.0), uWaveMix.x) * uWaveMix.y;
 }
 // far-reaching effects (mirroring the script): air blast overpressure, seismic shaking, re-entry heating
 uniform vec4 uFrG, uFrGK, uRF; uniform highp sampler2DArray tRF;
@@ -1035,7 +1028,7 @@ vec3 reentryFx(vec3 col, vec2 uv) {      // ejecta re-entering the upper atmosph
 }
 // wildfires lit by the re-entering ejecta (fire codes from the re-entry heating, see fireCodes() in the script).
 // Dry litter catches under a short pulse, live forest only under a long one (Belcher et al. 2015); fuel is patchy.
-uniform sampler2D tFire; uniform vec4 uFire; // y,z: earliest possible ignition in each scenario
+uniform float uOrbit; uniform sampler2D tFire; uniform vec4 uFire; // y,z: earliest possible ignition in each scenario
        // x: 0 off, 1 patchy (the falling debris shields the ground), 2 firestorm (it does not)
 // the prevailing winds of 5 May at 66 Ma (pipeline/wind.py: a climate model on the same map), turned into the regional
 // map's frame, where east and north point a different way at every place
@@ -1084,6 +1077,14 @@ float fireAge(vec2 uv, vec2 xz0, bool land, float h) {    // seconds since the f
   if (code.y > 0.5) { tc = (code.y - 1.0) * 120.0; thr = storm ? 0.34 : 0.41; }   // live forest catches: most of the land burns
   else if (code.x > 0.5) { tc = (code.x - 1.0) * 120.0; thr = 0.57; }             // only dry litter: scattered patches
   if (uT <= tc) return -1.0;
+  if (uOrbit > 0.5) {
+    // At planetary scale show a cell's aggregate burn, with mottled fuel and
+    // staggered ignition instead of resolving individual travelling flame fronts.
+    float fuel = lnz(xz / 181000.0 + 0.27);
+    fireW = smoothstep(thr - 0.08, thr + 0.08, fuel);
+    fireR = 0.4;
+    return uT - tc - 3600.0 * fuel;
+  }
   // fuel: a warped fractal (long, unmatched periods: no visible repeat), soft at its edges
   vec2 w = xz + (vec2(lnz(xz / 52300.0 + 0.3), lnz(xz / 52300.0 + 0.71)) - 0.5) * 30000.0 + (vec2(nz(xz / 7900.0 + 0.1), nz(xz / 7900.0 + 0.6)) - 0.5) * 3500.0;
   float q = lnz(w / 181000.0 + 0.27) * 0.5 + lnz(w / 41300.0 + 0.13) * 0.3 + nz(w / 9700.0 + 0.71) * 0.2;
@@ -1141,6 +1142,12 @@ vec3 fireGlow(vec3 col, float age, float dAge, float fp, vec2 uv, vec2 xz0, vec3
   // reaching further in a stronger wind, drawn out into streaks along the wind
   vec2 ws = fireDir(windAt(uv, xz0).zw, xz0, far); float U = length(ws);
   vec2 wind = U > 0.1 ? ws / U : vec2(1.0, 0.0);
+  if (uOrbit > 0.5) {
+    vec2 source = xz - ws * 3600.0;
+    float smoke = fireBurn(uvOfFlat(far ? fireFold(source) : source), source) * uAir;
+    vec3 glow = vec3(0.54, 0.15, 0.04) * w0 * fireAct(age);
+    return mix(col + glow, vec3(0.49, 0.44, 0.38) * light, 0.55 * smoke);
+  }
   float wa = ((vnz(xz / 900000.0 + 0.43) - 0.5) * 1.2 + (vnz(xz / 260000.0 + 0.17) - 0.5) * 0.5) * 1.6 / (1.0 + 0.12 * U);   // the day's weather: the wind wanders about its mean (+-35 deg at 5 m/s), most where the mean is weak
   wind = vec2(wind.x * cos(wa) - wind.y * sin(wa), wind.x * sin(wa) + wind.y * cos(wa));
   vec2 perp = vec2(-wind.y, wind.x);
@@ -2708,12 +2715,44 @@ function ensureFrames() {
         for (let y = 0; y < GTH; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = base + y * GTW; for (let x = 0; x < GTW; x++, src += 4) data[row + x] = im.px[src]; }
       }
     }
-    const tGF = new THREE.DataArrayTexture(data, GTW, GTH, n);
-    tGF.format = THREE.RedFormat; tGF.type = THREE.UnsignedByteType; tGF.magFilter = tGF.minFilter = THREE.NearestFilter; tGF.unpackAlignment = 1; tGF.needsUpdate = true;
-      GU.tGF.value = tGF; GU.uGF.value.x = GLB.frames.t0;
+    CPU.waveFrames = data;
     }
   })();
   return framesReady;
+}
+// Decode only when playback or a seek enters a new 20-minute interval.
+let wavePair = -1;
+const waveHeight = Uint16Array.from({length: 256}, (_, code) => {
+  const a = (code - 128) / 127;
+  return code ? THREE.DataUtils.toHalfFloat(a * Math.abs(a) * GLB.w.eta_max) : 0;
+});
+function updateWaveTexture(t) {
+  const {t0, dt, n} = GLB.frames;
+  if (!CPU.waveFrames || t < t0 || t > t0 + (n + 260) * dt) {
+    GU.uWaveMix.value.y = 0;
+    return;
+  }
+  const frame = Math.min((t - t0) / dt, n - 1), first = Math.floor(frame);
+  GU.uWaveMix.value.set(frame - first, Math.exp(-Math.max(0, t - t0 - (n - 1) * dt) / 43200));
+  if (first === wavePair) return;
+  const count = GTW * GTH;
+  let tex = GU.tGF.value;
+  if (!tex) {
+    tex = new THREE.DataTexture(new Uint16Array(count * 4), GTW, GTH * 2, THREE.RGFormat, THREE.HalfFloatType);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.magFilter = tex.minFilter = THREE.LinearFilter;
+    GU.tGF.value = tex;
+  }
+  for (let slot = 0; slot < 2; slot++) {
+    const offset = Math.min(first + slot, n - 1) * count;
+    for (let i = 0, dst = slot * count * 2; i < count; i++, dst += 2) {
+      const code = CPU.waveFrames[offset + i];
+      tex.image.data[dst] = waveHeight[code];
+      tex.image.data[dst + 1] = code ? 0x3c00 : 0; // float16 1 or 0
+    }
+  }
+  tex.needsUpdate = true;
+  wavePair = first;
 }
 function loadSWE() {
   if (sweReq) return sweReq;
@@ -3424,7 +3463,7 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  xrScale = 0.8; xrLast = 0; xrPlace = true; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); updateHud(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3442,43 +3481,45 @@ scene.onBeforeRender = (r, sc, cam) => {
   }
   const e = cam.cameras[0]; if (e) { xrPxT = ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2; starU.uStarPx.value = clamp(e.viewport.w / 1400, 0.4, 1.5); }          // sprite sizes; stars sized for the eye buffer, not the page's pixel ratio
 };
-// ---- the interface in VR: a console panel floating in front of you, worked with a laser pointer from either hand ----
+// ---- the interface in VR: three floating panels around the simulation, worked with a laser pointer from either hand ----
 // Point at it and pull the trigger to press a button or drag the timeline; hold the grip while pointing at it to carry it
 // somewhere else. Off the panel the grip grabs the world (one hand drags, two hands stretch and turn).
-// Sticks: left = turn (left/right) and tilt (forward/back), right = time (left/right) and zoom (forward/back). A / X: play or pause. B / Y: bring the panel back in front of you.
-import { XW, XH, TL, panelHit, makePanelPainter } from './vr-panel.js';
-const PW = 0.5, PH = PW * XH / XW;
-const XK = 1.5;          // the panel is drawn at 1.5x: sharp when you lean in
-const xrCv = document.createElement('canvas'); xrCv.width = XW * XK; xrCv.height = XH * XK;
-const xrTex = new THREE.CanvasTexture(xrCv); xrTex.colorSpace = THREE.SRGBColorSpace; xrTex.anisotropy = 4;
-const xrUi = o => Object.assign(o, { transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false });   // drawn last, over the world
-const xrPanel = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), new THREE.MeshBasicMaterial(xrUi({ map: xrTex })));
-xrPanel.renderOrder = 1000; xrPanel.frustumCulled = false; rig.add(xrPanel);
+// Sticks: left = turn (left/right) and tilt (forward/back), right = time (left/right) and zoom (forward/back). A / X: play or pause. B / Y: recenter the three panels.
+import { XW, surfaces, TL, panelHit, makePanelPainter } from './vr-panel.js';
+const xrUi = o => Object.assign(o, { transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false });
+const xrPanels = Object.entries(surfaces).map(([name, spec]) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = XW * 1.5; canvas.height = spec.height * 1.5;
+  const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 4;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(spec.width, spec.width * spec.height / XW), new THREE.MeshBasicMaterial(xrUi({map})));
+  mesh.renderOrder = 1000; mesh.frustumCulled = false; rig.add(mesh);
+  return {name, spec, mesh, canvas, key: null};
+});
 const xrCtl = [0, 1].map(i => {
   const c = renderer.xr.getController(i); rig.add(c);
   const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.45 })));
   const tip = new THREE.Mesh(new THREE.SphereGeometry(0.005, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.7 })));
   const cur = new THREE.Mesh(new THREE.RingGeometry(0.0024, 0.0040, 24), new THREE.MeshBasicMaterial(xrUi({ color: 0xffdda6 })));
   ray.renderOrder = tip.renderOrder = 1002; cur.renderOrder = 1001; cur.visible = false; ray.frustumCulled = tip.frustumCulled = cur.frustumCulled = false;
-  c.add(ray, tip); xrPanel.add(cur);
+  c.add(ray, tip); rig.add(cur);
   const d = c.userData; Object.assign(d, { ray, cur, prev: new THREE.Vector3(), grab: false, hold: false, sel: false, hit: null, drag: null });
   const pinchStart = new THREE.Vector3();
   let pinchTime = 0, lastTap = -Infinity;
   function release() {
     d.grab = d.sel = false; d.drag = null;
-    if (d.hold) { d.hold = false; rig.attach(xrPanel); }
+    if (d.hold) { rig.attach(d.hold); d.hold = null; }
   }
   function grab() { d.grab = true; d.prev.copy(c.position); }
-  function carry() { d.hold = true; c.attach(xrPanel); }
+  function carry() { d.hold = d.hit.panel.mesh; c.attach(d.hold); }
   c.addEventListener('connected', e => { d.src = e.data; lastTap = -Infinity; });
   c.addEventListener('disconnected', () => { release(); d.hit = d.src = null; d.cur.visible = false; });
   c.addEventListener('squeezestart', () => {
     if (d.src?.hand) return;
-    if (d.hit && xrPanel.parent === rig) carry(); else grab();
+    if (d.hit && d.hit.panel.mesh.parent === rig) carry(); else grab();
   });
   c.addEventListener('squeezeend', () => {
     if (d.src?.hand) return;
-    d.grab = false; if (d.hold) { d.hold = false; rig.attach(xrPanel); }
+    d.grab = false; if (d.hold) { rig.attach(d.hold); d.hold = null; }
   });
   // Quest sends a native select gesture for an index pinch on tracked hands.
   c.addEventListener('selectstart', () => {
@@ -3487,7 +3528,7 @@ const xrCtl = [0, 1].map(i => {
       if (!c.visible) return;
       xrPoint(c);
       if (!d.hit) { grab(); pinchTime = performance.now(); pinchStart.copy(c.position); }
-      else if (d.hit.id === 'panel' && xrPanel.parent === rig) carry();
+      else if (d.hit.id === 'panel' && d.hit.panel.mesh.parent === rig) carry();
     }
     d.sel = true;
     if (d.hit) xrPress(c, d.hit);
@@ -3521,13 +3562,16 @@ function xrView(h, tilt) {                   // look at the crater from h metres
   const a = tilt * Math.PI / 180; _xcam.position.set(0, h * Math.cos(a), h * Math.sin(a)); _xcam.up.set(0, 0, -1); _xcam.lookAt(0, 0, 0);
   xrSeat(_xcam.position, _xcam.quaternion, h);
 }
-function xrSummon(side = false) {
-  if (xrPanel.parent !== rig) return;
-  const f = _xu.set(0, 0, -1).applyQuaternion(_hq); f.y = 0; if (f.lengthSq() < 1e-4) f.set(0, 0, -1); f.normalize();
-  if (side) f.applyAxisAngle(_Y, -Math.PI / 4);
-  const reach = side ? 0.82 : 0.58, drop = side ? 0.2 : 0.36;
-  xrPanel.position.copy(_hp).addScaledVector(f, reach); xrPanel.position.y -= drop;
-  xrPanel.rotation.set(-Math.atan2(drop, reach), Math.atan2(-f.x, -f.z), 0, 'YXZ');
+function xrSummon() {
+  for (const {mesh,spec} of xrPanels) {
+    if (mesh.parent !== rig) continue;
+    const f = _xu.set(0,0,-1).applyQuaternion(_hq); f.y = 0;
+    if (f.lengthSq() < 1e-4) f.set(0,0,-1);
+    f.normalize().applyAxisAngle(_Y,-deg(spec.yaw));
+    const reach = 0.86;
+    mesh.position.copy(_hp).addScaledVector(f,reach); mesh.position.y += spec.lift;
+    mesh.rotation.set(Math.atan2(spec.lift,reach),Math.atan2(-f.x,-f.z),0,'YXZ');
+  }
 }
 function xrPress(c, hit) {
   const id = hit.id; if (id === 'panel') return;
@@ -3541,31 +3585,40 @@ function xrPress(c, hit) {
   else if (id === 'en' || id === 'hu') { xrLang = id; pref('panelLanguage', id); }
   else if (id === 'help') xrHelp = !xrHelp;
   else if (id === 'exit') renderer.xr.getSession()?.end();
-  xrKey = '';
 }
 const _ro = new THREE.Vector3(), _rd = new THREE.Vector3(), _rm = new THREE.Matrix4();
 function xrPoint(c) {                        // where this hand's ray meets the panel: sets the cursor, the ray's length and what is under it
   const d = c.userData, previous = d.hit?.id; d.hit = null; d.cur.visible = false; d.ray.scale.z = 0.35;
-  if (!d.src || (d.src.hand && !c.visible) || xrPanel.parent !== rig || d.grab) return;
-  xrPanel.updateMatrix(); _rm.copy(xrPanel.matrix).invert();
-  _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0, 0, -1).applyQuaternion(c.quaternion).transformDirection(_rm);
-  if (_ro.z <= 0 || _rd.z >= -1e-4) return;
-  const t = -_ro.z / _rd.z, x = _ro.x + t * _rd.x, y = _ro.y + t * _rd.y, px = (x / PW + 0.5) * XW, py = (0.5 - y / PH) * XH;
-  const p = clamp((px - TL.x) / TL.w, 0, 1);
-  if (d.drag === 'time') setP(p);
-  if (Math.abs(x) > PW / 2 + 0.02 || Math.abs(y) > PH / 2 + 0.02 || t > 3) return;
-  d.ray.scale.z = t; d.cur.visible = true; d.cur.position.set(x, y, 0.001);
-  const id = d.drag || panelHit(px, py);
-  d.hit = { id, p };
+  if (!d.src || (d.src.hand && !c.visible) || d.hold || d.grab) return;
+  let nearest = 3;
+  for (const panel of xrPanels) {
+    const {mesh,name,spec} = panel;
+    if (mesh.parent !== rig || (d.drag && name !== 'timeline')) continue;
+    mesh.updateMatrix(); _rm.copy(mesh.matrix).invert();
+    _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0,0,-1).applyQuaternion(c.quaternion).transformDirection(_rm);
+    if (_ro.z <= 0 || _rd.z >= -1e-4) continue;
+    const t = -_ro.z/_rd.z, x = _ro.x+t*_rd.x, y = _ro.y+t*_rd.y;
+    const px = XW*(0.5+x/spec.width), py = spec.height/2-y*XW/spec.width;
+    const p = clamp((px-TL.x)/TL.w,0,1);
+    if (d.drag === 'time') setP(p);
+    if (t > nearest || px < 0 || px > XW || py < 0 || py > spec.height) continue;
+    nearest = t;
+    const id = d.drag || panelHit(name,px,py);
+    d.hit = {id,p,panel}; d.ray.scale.z = t;
+    if (d.cur.parent !== mesh) mesh.add(d.cur);
+    d.cur.visible = true; d.cur.position.set(x,y,0.001);
+  }
+  if (!d.hit) return;
+  const id = d.hit.id;
   d.cur.scale.setScalar(d.sel ? 0.75 : 1);
   if (id !== previous && id !== 'panel' && !d.drag) buzz(c, 0.12, 8);
 }
-let xrKey = '', xrDrawT = 0, xrHelp = false, xrPerf = '', xrPerfT = 0;
+let xrDrawT = 0, xrHelp = false, xrPerf = '', xrPerfT = 0;
 const xrPresets = { crater: [3e5, 46], gulf: [1.8e6, 26], earth: [6.5e6, 26] };
 let xrPreset = '', xrLang = ['hu', 'en'].includes(pref('panelLanguage')) ? pref('panelLanguage') : LANG;
 const xrTranslations = { hu: translator(hungarian), en: translator(null) };
 const panelTr = (s, values) => xrTranslations[xrLang](s, values);
-const paintPanel = makePanelPainter(xrCv, panelTr, TICKS.map(([, p]) => p),
+for (const panel of xrPanels) panel.paint = makePanelPainter(panel.name, panel.canvas, panelTr, TICKS.map(([, p]) => p),
   [[0, '−3 h'], [pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 d'], [1, '100 kyr']]);
 function xrDraw(dt) {
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.1;
@@ -3576,12 +3629,17 @@ function xrDraw(dt) {
   const pressed = xrCtl.map(c => c.userData.sel ? c.userData.drag || c.userData.hit?.id : null);
   const clock = impactClock(panelTr, xrLang), active = guide ? !guide.paused : playing;
   const hands = xrCtl.some(c => c.userData.src?.hand);
-  const key = [hands, xrLang, xrPreset, S.phase, clock, Math.round(P * TL.w), active, xrHelp, xrHelp && xrPerf, ...hover, ...pressed].join('|');
-  if (key === xrKey) return;
-  xrKey = key;
   const [title, story] = STAGES[S.phase];
-  paintPanel({ hands, lang: xrLang, preset: xrPreset, title: panelTr(title), story: panelTr(story), clock, p: P, playing: active, help: xrHelp, perf: xrPerf, hover, pressed });
-  xrTex.needsUpdate = true;
+  for (const panel of xrPanels) {
+    const local = xrCtl.map((c,i) => c.userData.hit?.panel === panel ? [hover[i],pressed[i]].join('/') : '');
+    const content = panel.name === 'timeline' ? [clock,Math.round(P*TL.w)] :
+      panel.name === 'guide' ? [hands,S.phase,xrHelp,xrHelp && xrPerf] : [hands,xrPreset,active];
+    const key = [xrLang,...content,...local].join('|');
+    if (key === panel.key) continue;
+    panel.key = key;
+    panel.paint({hands, lang:xrLang, preset:xrPreset, title:panelTr(title), story:panelTr(story), clock, p:P, playing:active, help:xrHelp, perf:xrPerf, hover, pressed});
+    panel.mesh.material.map.needsUpdate = true;
+  }
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
 let xrStickAxis = '', xrBtn = 0, xrPlace = true, xrAwake = 6;
@@ -3595,6 +3653,7 @@ function xrLod(restore, focus) {
     xrLods.push({ mesh: earthMesh, size: 2 * Math.PI * RE_M, base: earthMesh.geometry, max: earthMesh.geometry.parameters.widthSegments, cache: {}, make: n => new THREE.SphereGeometry(1, n, n / 2), earth: true });
   const s = rig.scale.x;
   // The crater has its own detailed terrain and water. Keep the surrounding Gulf coarse in close crater views.
+  GU.uOrbit.value = !restore && s >= 4e6 && altitude() >= 3e6 ? 1 : 0;
   const gulfOverview = !restore && s >= 8e5 && s <= 3e6 && focus.lengthSq() < GHALF * GHALF;
   ejGeom.setDrawRange(0, gulfOverview ? Math.min(8000, NEJ) : NEJ);
   plGeom.setDrawRange(0, gulfOverview ? Math.min(4000, NPL) : NPL);
@@ -3602,7 +3661,7 @@ function xrLod(restore, focus) {
   for (const l of xrLods) {
     let n = l.max;
     if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
-    if ((craterClose || gulfOverview) && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, 128);
+    if ((craterClose || gulfOverview || GU.uOrbit.value) && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, 128);
     if (!restore && l.earth && n > 256) {
       // Use a lighter sphere in the orbital view. Separate zoom thresholds avoid flicker when leaning in VR.
       const switchAltitude = l.mesh.geometry.parameters.widthSegments === 256 ? 1.75 * RE_M : 2 * RE_M;
@@ -3613,7 +3672,7 @@ function xrLod(restore, focus) {
   }
 }
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
-  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(true); } }
+  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(); } }
   rig.updateMatrixWorld(true);
   { // frame time (unclamped) -> viewport scale
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
@@ -3627,8 +3686,11 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   }
   // the panel steps back while no one points at it (after a few seconds at the start), so it does not compete with the Earth
   xrAwake = Math.max(0, xrAwake - dt);
-  const near = xrAwake > 0 || xrPanel.parent !== rig || xrCtl.some(c => c.userData.hit || c.userData.drag), pm = xrPanel.material;
-  pm.opacity += ((near ? 1 : 0.82) - pm.opacity) * Math.min(1, dt * 7);
+  for (const panel of xrPanels) {
+    const near = xrAwake > 0 || panel.mesh.parent !== rig || xrCtl.some(c => c.userData.hit?.panel === panel);
+    const mat = panel.mesh.material;
+    mat.opacity += ((near ? 1 : 0.88) - mat.opacity) * Math.min(1,dt*7);
+  }
   if (xrGo) { if (xrCtl.some(c => c.userData.grab)) xrGo = null; else { xrGlide(dt); rig.updateMatrixWorld(true); } }
   // grab: keep the world point that was in the hand (or between the hands) there
   const gr = xrCtl.filter(c => c.userData.grab);
@@ -3692,7 +3754,7 @@ function frame(now) {
   if (P !== appliedP) apply(P);
   if (S.imp.t > 0) streamNeeded(S.imp.t);
   updateEffects(); updateClimate(); updateSky();
-  GU.uT.value = S.imp.t;
+  GU.uT.value = S.imp.t; updateWaveTexture(S.imp.t);
   if (seaTour && playing && S.imp.t > 2500) { seaTour = false; VIEWS.gulf(); }
   updateFx();
   if (!xrOn) updateCamera(dt);
