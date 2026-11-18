@@ -532,9 +532,11 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 // Language: the English text is in the page and the code; hu.js maps it to Hungarian (long texts by their first 60 characters)
 const LANG = (() => { const q = new URLSearchParams(location.search).get('lang'); if (q) return q === 'hu' ? 'hu' : 'en'; try { return localStorage.getItem('chicxulub.lang') === 'hu' ? 'hu' : 'en'; } catch (_) { return 'en'; } })();
-const I18N = LANG === 'hu' ? (await import('./hu.js')).default : null;
+import hungarian from './hu.js';
+const I18N = LANG === 'hu' ? hungarian : null;
 const tkey = s => s.length > 80 ? s.slice(0, 60) : s;
-const tr = (s, v) => { const o = I18N && I18N.t[tkey(s)] || s; return v ? o.replace(/\{(\w+)(?:\|(\w+))?\}/g, (_, k, f) => f ? I18N.f[f](String(v[k])) : v[k]) : o; };
+const translator = dictionary => (s, v) => { const o = dictionary && dictionary.t[tkey(s)] || s; return v ? o.replace(/\{(\w+)(?:\|(\w+))?\}/g, (_, k, f) => f ? dictionary.f[f](String(v[k])) : v[k]) : o; };
+const tr = translator(I18N);
 const dec = s => I18N ? String(s).replace('.', ',') : String(s);            // decimal comma in Hungarian
 const fix = (x, d) => dec(x.toFixed(d));
 const grp = x => x.toLocaleString(LANG);
@@ -2042,8 +2044,8 @@ $('legendList').innerHTML = LEG.map(r => {
     : r.k === 'melt' ? 'radial-gradient(circle at 40% 40%, #ffb35a, #d2440f 55%, #3a0d06)' : r.k === 'brec' ? `radial-gradient(circle at 30% 40%, #c2b088 0 2px, transparent 2.5px) 0 0 / 7px 7px, ${LITH_HEX.brec}` : LITH_HEX[r.k];
   return `<li id="lg-${r.k}"><span class="sw" style="background:${sw}"></span><span class="nm">${tr(r.name)}${r.ag ? `<span class="ag">${tr(r.ag)}</span>` : ''}</span><span class="th" id="th-${r.k}"></span></li>`;
 }).join('');
-const fmtLong = t => { const d = t / 86400, y = t / YEAR; return d < 13.5 ? tr('{n} days', { n: Math.round(d) }) : d < 61 ? tr('{n} weeks', { n: Math.round(d / 7) }) : y < 1.95 ? tr('{n} months', { n: Math.round(y * 12) }) : y < 19.5 ? tr('{n} years', { n: fix(y, 1) }) : tr('{n} years', { n: grp(Math.round(Number(y.toPrecision(2)))) }); };
-const fmtHM = x => tr('{h} h {m} min', { h: Math.floor(x / 3600), m: String(Math.floor((x % 3600) / 60)).padStart(2, '0') });
+const fmtLong = (t, translate = tr, lang = LANG) => { const d = t / 86400, y = t / YEAR; return d < 13.5 ? translate('{n} days', { n: Math.round(d) }) : d < 61 ? translate('{n} weeks', { n: Math.round(d / 7) }) : y < 1.95 ? translate('{n} months', { n: Math.round(y * 12) }) : y < 19.5 ? translate('{n} years', { n: y.toFixed(1).replace('.', lang === 'hu' ? ',' : '.') }) : translate('{n} years', { n: Math.round(Number(y.toPrecision(2))).toLocaleString(lang) }); };
+const fmtHM = (x, translate = tr) => translate('{h} h {m} min', { h: Math.floor(x / 3600), m: String(Math.floor((x % 3600) / 60)).padStart(2, '0') });
 const fmtM = m => m >= 9500 ? `${fix(m / 1000, 0)} km` : m >= 1000 ? `${fix(m / 1000, 1)} km` : `${Math.round(m)} m`;
 let legT = 0;
 function updateLegend(force) {
@@ -2061,16 +2063,19 @@ function updateLegend(force) {
     : tr('{d} of sediment on the crystalline crust. Thicknesses change across the block: the pile is thickest to the north-north-east.', { d: fmtM(c.sed) });
 }
 
+function impactClock(translate, lang) {
+  const t = S.imp.t, imp = IMPACT_PH.has(S.phase);
+  const seconds = x => x.toFixed(1).replace('.', lang === 'hu' ? ',' : '.');
+  const mmss = x => translate('{m} min {s} s', { m: Math.floor(x / 60), s: String(Math.floor(x % 60)).padStart(2, '0') });
+  const after = x => translate('{t} after impact', { t: x });
+  return !imp ? translate({ crust: 'Carboniferous to Triassic', rift: 'Jurassic', evap: 'Early Cretaceous', platform: 'Late Cretaceous', ramp: 'latest Cretaceous', eve: 'moments before impact' }[S.phase])
+    : S.phase === 'crater' ? translate('10 minutes after impact') : t >= 172800 ? after(fmtLong(t, translate, lang)) : t <= -3600 ? translate('{t} before impact', { t: fmtHM(-t, translate) }) : t <= -60 ? translate('{n} min before impact', { n: Math.round(-t / 60) }) : t <= 0 ? translate('{n} s before impact', { n: seconds(-t) }) : t < 60 ? translate('{n} s after impact', { n: seconds(t) })
+    : t < 3600 ? after(mmss(t)) : after(fmtHM(t, translate));
+}
 function updateHud() {
   const [name, text] = STAGES[S.phase].map(x => tr(x));
   $('stageName').textContent = name; $('stageText').textContent = text;
-  const ma = S.ma, t = S.imp.t, imp = IMPACT_PH.has(S.phase);
-  const time = tr('66.04 Ma');
-  const mmss = x => tr('{m} min {s} s', { m: Math.floor(x / 60), s: String(Math.floor(x % 60)).padStart(2, '0') });
-  const after = x => tr('{t} after impact', { t: x });
-  const clock = !imp ? tr({ crust: 'Carboniferous to Triassic', rift: 'Jurassic', evap: 'Early Cretaceous', platform: 'Late Cretaceous', ramp: 'latest Cretaceous', eve: 'moments before impact' }[S.phase])
-    : S.phase === 'crater' ? tr('10 minutes after impact') : t >= 172800 ? after(fmtLong(t)) : t <= -3600 ? tr('{t} before impact', { t: fmtHM(-t) }) : t <= -60 ? tr('{n} min before impact', { n: Math.round(-t / 60) }) : t <= 0 ? tr('{n} s before impact', { n: fix(-t, 1) }) : t < 60 ? tr('{n} s after impact', { n: fix(t, 1) })
-    : t < 3600 ? after(mmss(t)) : after(fmtHM(t));
+  const time = tr('66.04 Ma'), clock = impactClock(tr, LANG);
   $('time').textContent = time; $('clock').textContent = clock;
   $('cursor').style.bottom = P * 100 + '%';
   colEl.setAttribute('aria-valuenow', String(Math.round(P * 1000))); colEl.setAttribute('aria-valuetext', `${time}, ${name}`);
@@ -3410,7 +3415,7 @@ renderer.xr.addEventListener('sessionstart', () => {
       m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
   }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
 });
 renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
@@ -3486,7 +3491,8 @@ function xrPress(c, hit) {
     tour = goAnim = null; setPlaying(false); setP(hit.p); c.userData.drag = 'time'; return;
   }
   if (id === 'prev') chapter(-1); else if (id === 'next') chapter(1); else if (id === 'play') togglePlay();
-  else if (id === 'earth') xrView(2.6e7, 0); else if (id === 'gulf') xrView(6.5e6, 26); else if (id === 'crater') xrView(3.0e5, 46);
+  else if (id in xrPresets) { xrPreset = id; xrView(...xrPresets[id]); }
+  else if (id === 'en' || id === 'hu') { xrLang = id; pref('panelLanguage', id); }
   else if (id === 'help') xrHelp = !xrHelp;
   else if (id === 'exit') renderer.xr.getSession()?.end();
   xrKey = '';
@@ -3509,7 +3515,11 @@ function xrPoint(c) {                        // where this hand's ray meets the 
   if (id !== previous && id !== 'panel' && !d.drag) buzz(c, 0.12, 8);
 }
 let xrKey = '', xrDrawT = 0, xrHelp = false, xrPerf = '', xrPerfT = 0;
-const paintPanel = makePanelPainter(xrCv, tr, TICKS.map(([, p]) => p),
+const xrPresets = { crater: [3e5, 46], gulf: [1.8e6, 26], earth: [6.5e6, 26] };
+let xrPreset = '', xrLang = ['hu', 'en'].includes(pref('panelLanguage')) ? pref('panelLanguage') : LANG;
+const xrTranslations = { hu: translator(hungarian), en: translator(null) };
+const panelTr = (s, values) => xrTranslations[xrLang](s, values);
+const paintPanel = makePanelPainter(xrCv, panelTr, TICKS.map(([, p]) => p),
   [[0, '−3 h'], [pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 d'], [1, '100 kyr']]);
 function xrDraw(dt) {
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.1;
@@ -3518,12 +3528,12 @@ function xrDraw(dt) {
   }
   const hover = xrCtl.map(c => c.userData.hit?.id);
   const pressed = xrCtl.map(c => c.userData.sel ? c.userData.drag || c.userData.hit?.id : null);
-  const clock = $('clock').textContent, active = guide ? !guide.paused : playing;
-  const key = [S.phase, clock, Math.round(P * TL.w), active, xrHelp, xrHelp && xrPerf, ...hover, ...pressed].join('|');
+  const clock = xrLang === LANG ? $('clock').textContent : impactClock(panelTr, xrLang), active = guide ? !guide.paused : playing;
+  const key = [xrLang, xrPreset, S.phase, clock, Math.round(P * TL.w), active, xrHelp, xrHelp && xrPerf, ...hover, ...pressed].join('|');
   if (key === xrKey) return;
   xrKey = key;
   const [title, story] = STAGES[S.phase];
-  paintPanel({ title: tr(title), story: tr(story), clock, p: P, playing: active, help: xrHelp, perf: xrPerf, hover, pressed });
+  paintPanel({ lang: xrLang, preset: xrPreset, title: panelTr(title), story: panelTr(story), clock, p: P, playing: active, help: xrHelp, perf: xrPerf, hover, pressed });
   xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
@@ -3569,6 +3579,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   if (xrGo) { if (xrCtl.some(c => c.userData.grab)) xrGo = null; else { xrGlide(dt); rig.updateMatrixWorld(true); } }
   // grab: keep the world point that was in the hand (or between the hands) there
   const gr = xrCtl.filter(c => c.userData.grab);
+  if (gr.length) xrPreset = '';
   if (gr.length === 1) {
     const c = gr[0]; _xw.copy(c.userData.prev).applyMatrix4(rig.matrixWorld).sub(_xa.copy(c.position).applyMatrix4(rig.matrixWorld)); rig.position.add(_xw);
   } else if (gr.length === 2) {
@@ -3596,6 +3607,7 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
   }
   const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld);          // the point 1 m in front of the head: what you are looking at
   if (zoom || turn || tilt) {
+    xrPreset = '';
     xrGo = null;
     const f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
     _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);

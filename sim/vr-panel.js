@@ -2,6 +2,7 @@
 export const XW = 1024, XH = 704;
 export const TL = { x: 50, y: 421, w: 924 };
 const buttons = [
+  ['en', 'English', 374, 20, 119, 62], ['hu', 'Magyar', 497, 20, 119, 62],
   ['help', 'Controls', 638, 20, 172, 62], ['exit', 'Leave VR', 824, 20, 158, 62],
   ['prev', 'Previous chapter', 42, 471, 288, 74], ['play', 'Play', 344, 471, 336, 74], ['next', 'Next chapter', 694, 471, 288, 74],
   ['crater', 'Crater', 42, 605, 304, 74], ['gulf', 'Gulf of Mexico', 360, 605, 304, 74], ['earth', 'Whole Earth', 678, 605, 304, 74],
@@ -56,11 +57,15 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
     g.font = font(weight,size); g.fillStyle = color; g.textAlign = align;
     if (width === undefined) g.fillText(s,x,y); else g.fillText(s,x,y,width);
   };
-  return ({ title, story, clock, p, playing, help, perf, hover, pressed }) => {
+  const shell = g.createLinearGradient(0,0,XW,XH);
+  shell.addColorStop(0,'#20393e'); shell.addColorStop(0.58,'#14272d'); shell.addColorStop(1,'#102328');
+  return ({ lang, preset, title, story, clock, p, playing, help, perf, hover, pressed }) => {
     g.setTransform(canvas.width / XW, 0, 0, canvas.height / XH, 0, 0); g.clearRect(0,0,XW,XH);
     g.textBaseline = 'middle';
-    box(2,2,XW-4,XH-4,30,'#162527','#748e8d');
-    icon(g,'crater',58,51,sea); text('Chicxulub',86,51,30,ink,650);
+    box(2,2,XW-4,XH-4,30,shell,'#637e81');
+    box(42,29,45,45,13,'#294c50');
+    icon(g,'crater',65,51,sea); text('Chicxulub',100,51,32,ink,650);
+    box(369,15,252,72,20,'#112429');
     g.fillStyle = '#425455'; g.fillRect(42,94,940,1);
     text(help ? tr('Hand controls') : title,44,133,42,ink,650,'left',930);
     if (help) {
@@ -89,21 +94,24 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
     g.fillStyle = pressed.includes('time') ? ink : gold; g.fill(); g.lineWidth=2; g.strokeStyle='#142020'; g.stroke();
 
     text(tr('Views'),44,584,24,ink,600);
+    g.fillStyle = '#425b60'; g.fillRect(166,584,356,1);
     text(tr('Point and press the trigger'),978,584,20,muted,450,'right');
     for (const b of buttons) {
       const hot = hover.includes(b.id), down = pressed.includes(b.id), primary = b.id === 'play';
-      const fill = primary ? (down ? '#dfa456' : hot ? '#ffdaad' : gold) : down ? '#476562' : hot ? '#304f4d' : '#243638';
-      box(b.x,b.y,b.w,b.h,14,fill, hot || down ? ink : primary ? null : '#4a6060');
-      const cy = b.y + b.h/2, cx = b.x + b.w/2, color = primary ? '#241d12' : ink;
+      const language = b.id === 'en' || b.id === 'hu';
+      const selected = b.id === lang || b.id === preset;
+      const fill = selected && !down ? (hot ? '#b9eee5' : '#a1dcd3') : primary ? (down ? '#dfa456' : hot ? '#ffdaad' : gold) : down ? '#476562' : hot ? '#304f4d' : '#243638';
+      box(b.x,b.y,b.w,b.h,14,fill, hot || down ? ink : primary || language || selected ? null : '#4a6060');
+      const cy = b.y + b.h/2, cx = b.x + b.w/2, color = selected && !down ? '#102c2d' : primary ? '#241d12' : ink;
       const label = tr(b.id === 'play' && playing ? 'Pause' : b.id === 'help' && help ? 'Back to story' : b.label);
       const symbol = b.id === 'play' && playing ? 'pause' : b.id;
-      if (b.id === 'exit' || b.id === 'help') text(label,cx,cy,23,color,550,'center',b.w-16);
+      if (language || b.id === 'exit' || b.id === 'help') text(label,cx,cy,23,color,550,'center',b.w-16);
       else {
         const size = primary ? 30 : 26;
         g.font = font(600,size);
         const width = Math.min(g.measureText(label).width,b.w-66);
         const left = cx-(width+43)/2;
-        icon(g,symbol,left+14,cy,primary ? color : sea);
+        icon(g,symbol,left+14,cy,primary || selected ? color : sea);
         text(label,left+43,cy,size,color,600,'left',b.w-66);
       }
     }
