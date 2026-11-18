@@ -4,6 +4,15 @@ const IG = [['óra', 'óráig']];
 const swap = (s, list, other) => { for (const [a, b] of list) if (s.endsWith(a)) return s.slice(0, -a.length) + b; return other(s); };
 const f = { val: s => swap(s, INS, x => x), ig: s => swap(s, IG, x => x + 'ig') };
 const t = {
+  "Hand tracking": "Kézkövetés",
+  "Point and pinch": "Mutass rá és csippents",
+  "Pinch the panel background": "Csippentés a panel hátterén",
+  "Move the panel": "A panel mozgatása",
+  "Pinch outside the panel": "Csippentés a panelen kívül",
+  "Move the world": "A modell mozgatása",
+  "Pinch with both hands": "Csippentés mindkét kézzel",
+  "Double pinch in the air": "Két gyors csippentés a levegőben",
+  "Point and pinch to select": "Mutass rá, majd csippents a kiválasztáshoz",
   " The global grid has a different land or sea setting from th": " A globális rács ennél a lelőhelynél más felszíntípust jelez, mint a kőzetek, ezért a helyi felszíni becslések kimaradnak.",
   "Controls": "Kezelés",
   "Leave VR": "Kilépés a VR-ból",

@@ -922,7 +922,7 @@ const GU = {
   uFrG: { value: new THREE.Vector4(-1, -1, -1, -1) }, uFrGK: { value: new THREE.Vector4() },
   tRF: { value: null }, uRF: { value: new THREE.Vector4(1, 1, 0, 0) },
   tCL: { value: null }, uCL: { value: new THREE.Vector4() }, uCLv: { value: new THREE.Vector4() }, uHaze: { value: new THREE.Color() }, uAir: { value: 1 },   // uAir 0: the atmosphere hidden (Options)
-  tFire: { value: null }, uFire: { value: new THREE.Vector4(1, 0, 0, 0) },
+  tFire: { value: null }, uFire: { value: new THREE.Vector4(1, 1e12, 1e12, 0) },
   tWind: { value: (() => { const t = new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1); t.needsUpdate = true; return t; })() }, uWindS: { value: new THREE.Vector2(15, 25) },   // calm until pipeline/wind.py's winds are in
 };
 const GTW = GLB.frames.w, GTH = GLB.frames.h;
@@ -1035,7 +1035,8 @@ vec3 reentryFx(vec3 col, vec2 uv) {      // ejecta re-entering the upper atmosph
 }
 // wildfires lit by the re-entering ejecta (fire codes from the re-entry heating, see fireCodes() in the script).
 // Dry litter catches under a short pulse, live forest only under a long one (Belcher et al. 2015); fuel is patchy.
-uniform sampler2D tFire; uniform vec4 uFire;       // x: 0 off, 1 patchy (the falling debris shields the ground), 2 firestorm (it does not)
+uniform sampler2D tFire; uniform vec4 uFire; // y,z: earliest possible ignition in each scenario
+       // x: 0 off, 1 patchy (the falling debris shields the ground), 2 firestorm (it does not)
 // the prevailing winds of 5 May at 66 Ma (pipeline/wind.py: a climate model on the same map), turned into the regional
 // map's frame, where east and north point a different way at every place
 uniform sampler2D tWind; uniform vec2 uWindS;
@@ -1074,7 +1075,7 @@ float fireW = 0.0, fireR = 0.0;                        // how fully this spot bu
 float fireAge(vec2 uv, vec2 xz0, bool land, float h) {    // seconds since the front reached this spot, or -1
   fireW = 0.0;
   bool far = length(xz0) > R_HALF; vec2 xz = far ? fireFold(xz0) : xz0;          // the fires' map
-  if (uFire.x < 0.5 || uT <= 0.0 || uT > 9.5e8 || !land || h > 3500.0 || abs(latOfUv(uv)) > 1.31) return -1.0;   // nothing left to show after ~30 years
+  if (uFire.x < 0.5 || uT <= (uFire.x > 1.5 ? uFire.z : uFire.y) || uT > 9.5e8 || !land || h > 3500.0 || abs(latOfUv(uv)) > 1.31) return -1.0;   // nothing left to show after ~30 years
   vec2 j = (vec2(lnz(xz / 70000.0), lnz(xz / 70000.0 + 0.53)) - 0.5) * 1.8;          // break up the 1 deg cells
   vec4 c = texture2D(tFire, uv + j * vec2(1.0 / 360.0, 1.0 / 180.0)) * 255.0;
   bool storm = uFire.x > 1.5;
@@ -1082,7 +1083,7 @@ float fireAge(vec2 uv, vec2 xz0, bool land, float h) {    // seconds since the f
   float tc = 1e12, thr = 1.0;
   if (code.y > 0.5) { tc = (code.y - 1.0) * 120.0; thr = storm ? 0.34 : 0.41; }   // live forest catches: most of the land burns
   else if (code.x > 0.5) { tc = (code.x - 1.0) * 120.0; thr = 0.57; }             // only dry litter: scattered patches
-  if (tc > 1e11) return -1.0;
+  if (uT <= tc) return -1.0;
   // fuel: a warped fractal (long, unmatched periods: no visible repeat), soft at its edges
   vec2 w = xz + (vec2(lnz(xz / 52300.0 + 0.3), lnz(xz / 52300.0 + 0.71)) - 0.5) * 30000.0 + (vec2(nz(xz / 7900.0 + 0.1), nz(xz / 7900.0 + 0.6)) - 0.5) * 3500.0;
   float q = lnz(w / 181000.0 + 0.27) * 0.5 + lnz(w / 41300.0 + 0.13) * 0.3 + nz(w / 9700.0 + 0.71) * 0.2;
@@ -1126,14 +1127,14 @@ float fireBurn(vec2 uv, vec2 xz) {     // the share of the ground around here bu
   vec2 j = (vec2(lnz(xz / 70000.0), lnz(xz / 70000.0 + 0.53)) - 0.5) * 1.8 + (vec2(lnz(xz / 233000.0 + 0.2), lnz(xz / 233000.0 + 0.8)) - 0.5) * 3.0;   // a ragged edge to the burnt region
   vec4 c = texture2D(tFire, uv + j * vec2(1.0 / 360.0, 1.0 / 180.0)) * 255.0; bool storm = uFire.x > 1.5; vec2 code = storm ? c.ba : c.rg;
   float tc = code.y > 0.5 ? (code.y - 1.0) * 120.0 : (code.x > 0.5 ? (code.x - 1.0) * 120.0 : 1e12);
-  if (tc > 1e11) return 0.0;
+  if (uT <= tc) return 0.0;
   float thr = code.y > 0.5 ? (storm ? 0.34 : 0.41) : 0.57, tt = uT - tc;
   float cover = smoothstep(thr - 0.14, thr + 0.1, lnz(xz / 181000.0 + 0.27) * 0.5 + 0.25);
   cover *= smoothstep(0.2, 0.75, lnz(xz / 913000.0 + 0.61));                       // some regions under a heavy pall, others nearly clear
   return lm * cover * smoothstep(0.0, 3600.0, tt) * exp(-tt / 64800.0);
 }
 vec3 fireGlow(vec3 col, float age, float dAge, float fp, vec2 uv, vec2 xz0, vec3 light) {   // dAge: fwidth(age), fp: the pixel's size (m), from the fragment shader
-  if (uFire.x < 0.5 || uT <= 0.0 || uT > 2e6) return col;
+  if (uFire.x < 0.5 || uT <= (uFire.x > 1.5 ? uFire.z : uFire.y) || uT > 2e6) return col;
   bool far = length(xz0) > R_HALF; vec2 xz = far ? fireFold(xz0) : xz0;          // the fires' map
   float w0 = fireW, fi = pow(clamp(fireR / 0.4, 0.05, 4.0), 0.46);              // the head fire burns fiercest: flame length ~ rate^0.46 (Byram 1959)
   // smoke: gathered from the fires upwind in the smoke layer's prevailing wind, the plume widening downwind and
@@ -1149,6 +1150,7 @@ vec3 fireGlow(vec3 col, float age, float dAge, float fp, vec2 uv, vec2 xz0, vec3
     vec2 xi = xz - wind * dd + perp * (lnz(xz / 61000.0 + float(i) * 0.37) - 0.5) * dd * 0.7;
     sm += fireBurn(uvOfFlat(far ? fireFold(xi) : xi), xi) * (1.0 - 0.2 * float(i));
   }
+  if (sm <= 0.0 && age <= 0.0) return col;
   // plumes drawn out along the wind, about three times longer than wide: one pattern laid out along three fixed
   // directions, blended by how close each is to the wind's. (Turning a pattern with the wind about coordinates thousands
   // of km from the crater sheared it into rings like wood grain wherever the wind veered.) A gentle warp breaks the lines
@@ -1984,7 +1986,7 @@ function apply(p) {
   U.uImpC.value.set(I.dex, I.Rex, I.t > 0 ? 1 : 0, I.t); U.uDepA.value.set(I.pkA, I.pkR, I.melt, I.pool);
   U.uDepB.value.set(I.brec, I.rLand, I.Rw, I.heat); U.uShock.value.set(I.Rs, I.shock, I.brecX || 0, 0); U.uRes.value.set(0, I.bias || 0, I.bore || 0, I.seiche || 0);
   rimLines.visible = peakLines.visible = showRim && I.t <= 0;
-  appliedP = p; updateHud();
+  appliedP = p; if (!xrOn) updateHud();
 }
 
 // ---------- HUD ----------
@@ -2913,14 +2915,21 @@ function blockToPaleo(x, z) {
 const FIRE = { thr: 12e3, litter: 1, live: 5, T: [0.1, 0.5] };
 function fireCodes() {
   const RX = META.reentry, n = RX.n, out = new Uint8Array(64800 * 4);
-  const dec = c => c ? Math.pow(10, (c - 1) / 254 * 7) : 0;
+  const firstIgnition = [1e12, 1e12];
+  const firstHot = FIRE.T.map(share => {
+    let code = 1;
+    while (code <= 255 && Math.pow(10, (code - 1) / 254 * 7) * share < FIRE.thr) code++;
+    return code;
+  });
   for (let i = 0; i < 64800; i++) for (let m = 0; m < 2; m++) {
     let cnt = 0, lit = 0, live = 0;
     for (let k = 0; k < n && !live; k++) {
-      if (dec(CPU.rf[k * 64800 + i]) * FIRE.T[m] >= FIRE.thr) { cnt++; const tc = Math.round((k + 1) * RX.dt / 120) + 1; if (cnt >= FIRE.litter && !lit) lit = tc; if (cnt >= FIRE.live) live = tc; }
+      if (CPU.rf[k * 64800 + i] >= firstHot[m]) { cnt++; const tc = Math.round((k + 1) * RX.dt / 120) + 1; if (cnt >= FIRE.litter && !lit) lit = tc; if (cnt >= FIRE.live) live = tc; }
     }
+    if (lit) firstIgnition[m] = Math.min(firstIgnition[m], (Math.min(lit, 255) - 1) * 120);
     out[i * 4 + m * 2] = Math.min(lit, 255); out[i * 4 + m * 2 + 1] = Math.min(live, 255);
   }
+  U.uFire.value.y = firstIgnition[0]; U.uFire.value.z = firstIgnition[1];
   CPU.fire = out;
   const tx = new THREE.DataTexture(out, 360, 180, THREE.RGBAFormat, THREE.UnsignedByteType); tx.magFilter = tx.minFilter = THREE.NearestFilter; tx.wrapS = THREE.RepeatWrapping; tx.needsUpdate = true;
   U.tFire.value = tx;
@@ -3417,7 +3426,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
   xrScale = 0.8; xrLast = 0; xrPlace = true; xrKey = ''; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
 });
-renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); });
+renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); updateHud(); });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
 // The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
 // there: sprite sizes, fades and the logarithmic depth all assume world metres. So just before each draw the eye cameras
@@ -3453,12 +3462,46 @@ const xrCtl = [0, 1].map(i => {
   ray.renderOrder = tip.renderOrder = 1002; cur.renderOrder = 1001; cur.visible = false; ray.frustumCulled = tip.frustumCulled = cur.frustumCulled = false;
   c.add(ray, tip); xrPanel.add(cur);
   const d = c.userData; Object.assign(d, { ray, cur, prev: new THREE.Vector3(), grab: false, hold: false, sel: false, hit: null, drag: null });
-  c.addEventListener('connected', e => { d.src = e.data; });
-  c.addEventListener('disconnected', () => { d.src = d.hit = d.drag = null; d.grab = d.sel = d.cur.visible = false; if (d.hold) { d.hold = false; rig.attach(xrPanel); } });
-  c.addEventListener('squeezestart', () => { if (d.hit && xrPanel.parent === rig) { d.hold = true; c.attach(xrPanel); } else { d.grab = true; d.prev.copy(c.position); } });
-  c.addEventListener('squeezeend', () => { d.grab = false; if (d.hold) { d.hold = false; rig.attach(xrPanel); } });
-  c.addEventListener('selectstart', () => { d.sel = true; if (d.hit) xrPress(c, d.hit); });
-  c.addEventListener('selectend', () => { d.sel = false; d.drag = null; });
+  const pinchStart = new THREE.Vector3();
+  let pinchTime = 0, lastTap = -Infinity;
+  function release() {
+    d.grab = d.sel = false; d.drag = null;
+    if (d.hold) { d.hold = false; rig.attach(xrPanel); }
+  }
+  function grab() { d.grab = true; d.prev.copy(c.position); }
+  function carry() { d.hold = true; c.attach(xrPanel); }
+  c.addEventListener('connected', e => { d.src = e.data; lastTap = -Infinity; });
+  c.addEventListener('disconnected', () => { release(); d.hit = d.src = null; d.cur.visible = false; });
+  c.addEventListener('squeezestart', () => {
+    if (d.src?.hand) return;
+    if (d.hit && xrPanel.parent === rig) carry(); else grab();
+  });
+  c.addEventListener('squeezeend', () => {
+    if (d.src?.hand) return;
+    d.grab = false; if (d.hold) { d.hold = false; rig.attach(xrPanel); }
+  });
+  // Quest sends a native select gesture for an index pinch on tracked hands.
+  c.addEventListener('selectstart', () => {
+    if (d.sel || !d.src) return;
+    if (d.src.hand) {
+      if (!c.visible) return;
+      xrPoint(c);
+      if (!d.hit) { grab(); pinchTime = performance.now(); pinchStart.copy(c.position); }
+      else if (d.hit.id === 'panel' && xrPanel.parent === rig) carry();
+    }
+    d.sel = true;
+    if (d.hit) xrPress(c, d.hit);
+  });
+  c.addEventListener('selectend', () => {
+    if (d.src?.hand) {
+      const now = performance.now();
+      const tap = d.grab && now - pinchTime < 260 && c.position.distanceTo(pinchStart) < 0.035;
+      release();
+      if (tap && now - lastTap < 420) { xrSummon(); lastTap = -Infinity; }
+      else lastTap = tap ? now : -Infinity;
+    } else { d.sel = false; d.drag = null; }
+  });
+  d.trackingLost = () => { release(); lastTap = -Infinity; };
   return c;
 });
 const buzz = (c, a = 0.5, ms = 14) => { try { c.userData.src?.gamepad?.hapticActuators?.[0]?.pulse?.(a, ms); } catch (_) {} };
@@ -3478,10 +3521,13 @@ function xrView(h, tilt) {                   // look at the crater from h metres
   const a = tilt * Math.PI / 180; _xcam.position.set(0, h * Math.cos(a), h * Math.sin(a)); _xcam.up.set(0, 0, -1); _xcam.lookAt(0, 0, 0);
   xrSeat(_xcam.position, _xcam.quaternion, h);
 }
-function xrSummon() {                        // the panel: below the line of sight, half a metre ahead, facing the head
+function xrSummon(side = false) {
   if (xrPanel.parent !== rig) return;
   const f = _xu.set(0, 0, -1).applyQuaternion(_hq); f.y = 0; if (f.lengthSq() < 1e-4) f.set(0, 0, -1); f.normalize();
-  xrPanel.position.copy(_hp).addScaledVector(f, 0.58); xrPanel.position.y -= 0.36; xrPanel.rotation.set(-0.5, Math.atan2(-f.x, -f.z), 0, 'YXZ');
+  if (side) f.applyAxisAngle(_Y, -Math.PI / 4);
+  const reach = side ? 0.82 : 0.58, drop = side ? 0.2 : 0.36;
+  xrPanel.position.copy(_hp).addScaledVector(f, reach); xrPanel.position.y -= drop;
+  xrPanel.rotation.set(-Math.atan2(drop, reach), Math.atan2(-f.x, -f.z), 0, 'YXZ');
 }
 function xrPress(c, hit) {
   const id = hit.id; if (id === 'panel') return;
@@ -3500,7 +3546,7 @@ function xrPress(c, hit) {
 const _ro = new THREE.Vector3(), _rd = new THREE.Vector3(), _rm = new THREE.Matrix4();
 function xrPoint(c) {                        // where this hand's ray meets the panel: sets the cursor, the ray's length and what is under it
   const d = c.userData, previous = d.hit?.id; d.hit = null; d.cur.visible = false; d.ray.scale.z = 0.35;
-  if (!d.src || xrPanel.parent !== rig || d.grab) return;
+  if (!d.src || (d.src.hand && !c.visible) || xrPanel.parent !== rig || d.grab) return;
   xrPanel.updateMatrix(); _rm.copy(xrPanel.matrix).invert();
   _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0, 0, -1).applyQuaternion(c.quaternion).transformDirection(_rm);
   if (_ro.z <= 0 || _rd.z >= -1e-4) return;
@@ -3528,12 +3574,13 @@ function xrDraw(dt) {
   }
   const hover = xrCtl.map(c => c.userData.hit?.id);
   const pressed = xrCtl.map(c => c.userData.sel ? c.userData.drag || c.userData.hit?.id : null);
-  const clock = xrLang === LANG ? $('clock').textContent : impactClock(panelTr, xrLang), active = guide ? !guide.paused : playing;
-  const key = [xrLang, xrPreset, S.phase, clock, Math.round(P * TL.w), active, xrHelp, xrHelp && xrPerf, ...hover, ...pressed].join('|');
+  const clock = impactClock(panelTr, xrLang), active = guide ? !guide.paused : playing;
+  const hands = xrCtl.some(c => c.userData.src?.hand);
+  const key = [hands, xrLang, xrPreset, S.phase, clock, Math.round(P * TL.w), active, xrHelp, xrHelp && xrPerf, ...hover, ...pressed].join('|');
   if (key === xrKey) return;
   xrKey = key;
   const [title, story] = STAGES[S.phase];
-  paintPanel({ lang: xrLang, preset: xrPreset, title: panelTr(title), story: panelTr(story), clock, p: P, playing: active, help: xrHelp, perf: xrPerf, hover, pressed });
+  paintPanel({ hands, lang: xrLang, preset: xrPreset, title: panelTr(title), story: panelTr(story), clock, p: P, playing: active, help: xrHelp, perf: xrPerf, hover, pressed });
   xrTex.needsUpdate = true;
 }
 const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
@@ -3548,11 +3595,14 @@ function xrLod(restore, focus) {
     xrLods.push({ mesh: earthMesh, size: 2 * Math.PI * RE_M, base: earthMesh.geometry, max: earthMesh.geometry.parameters.widthSegments, cache: {}, make: n => new THREE.SphereGeometry(1, n, n / 2), earth: true });
   const s = rig.scale.x;
   // The crater has its own detailed terrain and water. Keep the surrounding Gulf coarse in close crater views.
+  const gulfOverview = !restore && s >= 8e5 && s <= 3e6 && focus.lengthSq() < GHALF * GHALF;
+  ejGeom.setDrawRange(0, gulfOverview ? Math.min(8000, NEJ) : NEJ);
+  plGeom.setDrawRange(0, gulfOverview ? Math.min(4000, NPL) : NPL);
   const craterClose = !restore && s <= 2 * HALF && focus.lengthSq() <= HALF * HALF;
   for (const l of xrLods) {
     let n = l.max;
     if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
-    if (craterClose && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, 128);
+    if ((craterClose || gulfOverview) && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, 128);
     if (!restore && l.earth && n > 256) {
       // Use a lighter sphere in the orbital view. Separate zoom thresholds avoid flicker when leaning in VR.
       const switchAltitude = l.mesh.geometry.parameters.widthSegments === 256 ? 1.75 * RE_M : 2 * RE_M;
@@ -3563,7 +3613,7 @@ function xrLod(restore, focus) {
   }
 }
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
-  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(); } }
+  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(true); } }
   rig.updateMatrixWorld(true);
   { // frame time (unclamped) -> viewport scale
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
@@ -3571,7 +3621,10 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
-  for (const c of xrCtl) xrPoint(c);
+  for (const c of xrCtl) {
+    if (c.userData.src?.hand && !c.visible && c.userData.sel) c.userData.trackingLost();
+    xrPoint(c);
+  }
   // the panel steps back while no one points at it (after a few seconds at the start), so it does not compete with the Earth
   xrAwake = Math.max(0, xrAwake - dt);
   const near = xrAwake > 0 || xrPanel.parent !== rig || xrCtl.some(c => c.userData.hit || c.userData.drag), pm = xrPanel.material;

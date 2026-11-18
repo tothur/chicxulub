@@ -18,6 +18,11 @@ const helpRows = [
   ['Both grips', 'Resize and rotate the world'], ['A / X', 'Play or pause'],
   ['B / Y', 'Bring the panel back'],
 ];
+const pinchHelp = [
+  ['Point and pinch', 'Select or drag the timeline'], ['Pinch the panel background', 'Move the panel'],
+  ['Pinch outside the panel', 'Move the world'], ['Pinch with both hands', 'Resize and rotate the world'],
+  ['Double pinch in the air', 'Bring the panel back'],
+];
 const ink = '#f4f3eb', muted = '#b9c9c8', sea = '#9bded3', gold = '#ffc476';
 const font = (weight, size) => weight + ' ' + size + 'px Roboto, system-ui, sans-serif';
 
@@ -59,7 +64,7 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
   };
   const shell = g.createLinearGradient(0,0,XW,XH);
   shell.addColorStop(0,'#20393e'); shell.addColorStop(0.58,'#14272d'); shell.addColorStop(1,'#102328');
-  return ({ lang, preset, title, story, clock, p, playing, help, perf, hover, pressed }) => {
+  return ({ hands, lang, preset, title, story, clock, p, playing, help, perf, hover, pressed }) => {
     g.setTransform(canvas.width / XW, 0, 0, canvas.height / XH, 0, 0); g.clearRect(0,0,XW,XH);
     g.textBaseline = 'middle';
     box(2,2,XW-4,XH-4,30,shell,'#637e81');
@@ -67,9 +72,9 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
     icon(g,'crater',65,51,sea); text('Chicxulub',100,51,32,ink,650);
     box(369,15,252,72,20,'#112429');
     g.fillStyle = '#425455'; g.fillRect(42,94,940,1);
-    text(help ? tr('Hand controls') : title,44,133,42,ink,650,'left',930);
+    text(help ? tr(hands ? 'Hand tracking' : 'Hand controls') : title,44,133,42,ink,650,'left',930);
     if (help) {
-      helpRows.forEach(([input,action],i) => {
+      (hands ? pinchHelp : helpRows).forEach(([input,action],i) => {
         const x = 46 + (i % 2) * 481, y = 174 + Math.floor(i/2)*52;
         text(tr(input),x,y,19,sea,650); text(tr(action),x,y+24,23,ink,450,'left',452);
       });
@@ -95,7 +100,7 @@ export function makePanelPainter(canvas, tr, chapterTicks, landmarks) {
 
     text(tr('Views'),44,584,24,ink,600);
     g.fillStyle = '#425b60'; g.fillRect(166,584,356,1);
-    text(tr('Point and press the trigger'),978,584,20,muted,450,'right');
+    text(tr(hands ? 'Point and pinch to select' : 'Point and press the trigger'),978,584,20,muted,450,'right');
     for (const b of buttons) {
       const hot = hover.includes(b.id), down = pressed.includes(b.id), primary = b.id === 'play';
       const language = b.id === 'en' || b.id === 'hu';
