@@ -91,19 +91,36 @@ export function makePanelPainter(surface, canvas, tr, chapterTicks, landmarks) {
   const XH = surfaces[surface].height;
   const shell = g.createLinearGradient(0,0,XW,XH);
   shell.addColorStop(0,'#1e3942'); shell.addColorStop(0.55,'#122932'); shell.addColorStop(1,'#0c1c25');
+  let tlBg = null, tlLang = null;
+  function ensureTimelineBg(lang) {
+    if (tlBg && tlLang === lang) return tlBg;
+    tlLang = lang;
+    tlBg ||= Object.assign(document.createElement('canvas'), { width: canvas.width, height: canvas.height });
+    const bg = tlBg.getContext('2d');
+    bg.setTransform(tlBg.width/XW,0,0,tlBg.height/XH,0,0); bg.clearRect(0,0,XW,XH); bg.textBaseline='middle';
+    const bShell = bg.createLinearGradient(0,0,XW,XH);
+    bShell.addColorStop(0,'#1e3942'); bShell.addColorStop(0.55,'#122932'); bShell.addColorStop(1,'#0c1c25');
+    bg.beginPath(); bg.roundRect(2,2,XW-4,XH-4,26); bg.fillStyle = bShell; bg.fill();
+    bg.strokeStyle = '#66858b'; bg.lineWidth = 2; bg.stroke();
+    bg.font = font(600,25); bg.fillStyle = sea; bg.textAlign = 'left'; bg.fillText(tr('Time'),38,35);
+    bg.beginPath(); bg.roundRect(TL.x,TL.y-3,TL.w,6,3); bg.fillStyle = '#50636a'; bg.fill();
+    bg.fillStyle='#607378'; for(let i=0;i<=80;i++) bg.fillRect(TL.x+i*TL.w/80,TL.y+7,1,i%5===0?7:3);
+    bg.fillStyle=muted; for(const tick of chapterTicks) bg.fillRect(TL.x+tick*TL.w,TL.y-12,2,6);
+    bg.font = font(500,18); bg.fillStyle = muted;
+    for(const [v,label] of landmarks) { bg.textAlign = v===0?'left':v===1?'right':'center'; bg.fillText(tr(label),TL.x+v*TL.w,109); }
+    return tlBg;
+  }
   return ({ hands, lang, preset, title, story, clock, p, playing, help, perf, hover, pressed }) => {
     g.setTransform(canvas.width/XW,0,0,canvas.height/XH,0,0); g.clearRect(0,0,XW,XH); g.textBaseline='middle';
-    box(2,2,XW-4,XH-4,26,shell,'#66858b');
     if (surface==='timeline') {
-      text(tr('Time'),38,35,25,sea,600); text(clock,762,35,30,ink,650,'right',625);
-      box(TL.x,TL.y-3,TL.w,6,3,'#50636a');
+      g.setTransform(1,0,0,1,0,0); g.drawImage(ensureTimelineBg(lang),0,0);
+      g.setTransform(canvas.width/XW,0,0,canvas.height/XH,0,0); g.textBaseline='middle';
+      text(clock,762,35,30,ink,650,'right',625);
       if(p>0) box(TL.x,TL.y-3,p*TL.w,6,3,gold);
-      g.fillStyle='#607378'; for(let i=0;i<=80;i++) g.fillRect(TL.x+i*TL.w/80,TL.y+7,1,i%5===0?7:3);
-      g.fillStyle=muted; for(const tick of chapterTicks) g.fillRect(TL.x+tick*TL.w,TL.y-12,2,6);
-      for(const [v,label] of landmarks) text(tr(label),TL.x+v*TL.w,109,18,muted,500,v===0?'left':v===1?'right':'center');
       g.beginPath(); g.arc(TL.x+p*TL.w,TL.y,hover.includes('time')?12:9,0,2*Math.PI);
       g.fillStyle=pressed.includes('time')?ink:gold; g.fill(); return;
     }
+    box(2,2,XW-4,XH-4,26,shell,'#66858b');
     if(surface==='guide') {
       icon(g,'crater',53,48,gold); text('Chicxulub',84,48,27,sea,600);
       g.fillStyle='#45616a'; g.fillRect(38,92,724,1);

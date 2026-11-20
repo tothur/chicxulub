@@ -617,11 +617,6 @@ function unpackFrames(kind, imgs) {
 // the frames stream in after the first view (loadSWE); until then the sea before 10 minutes' sketch carries on
 const SWF = new Uint8Array(SW.far.size * SW.far.size * SW.far.n), SWN = new Uint8Array(SW.near.size * SW.near.size * SW.near.n);
 let swOn = false;
-function frameTex(data, k) {
-  const t = new THREE.DataArrayTexture(data, k.size, k.size, k.n);
-  t.format = THREE.RedFormat; t.type = THREE.UnsignedByteType; t.magFilter = t.minFilter = THREE.NearestFilter; t.unpackAlignment = 1; t.needsUpdate = true; return t;
-}
-const tFar = frameTex(SWF, SW.far), tNear = frameTex(SWN, SW.near);
 const tNoise = (() => {
   const S = 256, a = new Uint8Array(S * S), oct = [[8, .5], [16, .25], [32, .15], [64, .1]];
   const grids = oct.map(([g]) => Float32Array.from({ length: g * g }, () => Math.random()));
@@ -664,12 +659,19 @@ const pOfT = t => { const s = SEG.find(s => t >= s[3] && t <= s[4]) || SEG[SEG.l
 const T_EX = 60, T_UP = 180, T_END = 600, REX = 46000;                 // s, s, s, excavation radius (m)
 const ejV = r0 => Math.min(3200, 450 * Math.pow(r0 / REX, -1.6));     // ejection speed, falling off with launch distance
 const ejT0 = r0 => T_EX * Math.pow(r0 / REX, 1 / 0.45);                // launch time: when the excavation front reaches r0
+const RLAND_T = new Float32Array(48), RLAND_R = new Float32Array(48);
+let RLAND_MAX = 0, RLAND_TMAX = 0;
+for (let i = 1; i <= 48; i++) {
+  const r0 = REX * i / 48, v = ejV(r0) * 0.85, tl = ejT0(r0) + 1.414 * v / 9.81, rl = r0 + v * v / 9.81;
+  RLAND_T[i - 1] = tl; RLAND_R[i - 1] = rl; RLAND_MAX = Math.max(RLAND_MAX, rl); RLAND_TMAX = Math.max(RLAND_TMAX, tl);
+}
 function impact(t) {
   const kE = t > 0 ? Math.pow(clamp(t / T_EX, 0, 1), 0.45) : 0;      // cavity growth
   const kU = smooth(T_EX, T_UP, t);                                     // floor rebounds into a central uplift
   const kC = 1 - Math.pow(1 - clamp((t - T_UP) / (T_END - T_UP), 0, 1), 2.5);   // uplift and rim collapse
   let rLand = 0;                                                        // outer edge of ejecta that has come down
-  for (let i = 1; i <= 48; i++) { const r0 = REX * i / 48, v = ejV(r0) * 0.85; if (ejT0(r0) + 1.414 * v / 9.81 <= t) rLand = Math.max(rLand, r0 + v * v / 9.81); }
+  if (t >= RLAND_TMAX) rLand = RLAND_MAX;
+  else if (t > 0) for (let i = 0; i < 48; i++) if (RLAND_T[i] <= t && RLAND_R[i] > rLand) rLand = RLAND_R[i];
   const Rt = Math.max(1000, 50000 * Math.pow(kE, 0.9)), Rb = mix(Rt, 62000, kC);
   return {
     t, kE, kU, kC,
@@ -829,7 +831,10 @@ function columnAt(x, z) {
 
 // ---------- renderer ----------
 const stageEl = $('stage');
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: false, powerPreference: 'high-performance' });
+const gl = renderer.getContext();
+const canRenderHalfFloat = !!(renderer.extensions.get('EXT_color_buffer_float') || renderer.extensions.get('EXT_color_buffer_half_float'));
+if (canRenderHalfFloat) { tTgt.minFilter = THREE.LinearMipmapLinearFilter; tTgt.generateMipmaps = true; tTgt.needsUpdate = true; }
 // quality: Auto adapts the resolution to the frame rate; High keeps full resolution; Low draws at 1x, without bloom
 const QUALITY = (() => { try { return localStorage.getItem('chicxulub.quality') || 'auto'; } catch (_) { return 'auto'; } })();
 const PR_MAX = QUALITY === 'low' ? 1 : Math.min(2, devicePixelRatio); let pr = QUALITY === 'auto' && SMALL ? Math.min(PR_MAX, 1.5) : PR_MAX;
@@ -840,6 +845,82 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, 1, 5, 2e9);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.maxPolarAngle = 2.2; controls.minDistance = 500; controls.maxDistance = 6e7; controls.zoomSpeed = 1.4;
+// All scene ShaderMaterials include tone mapping and sRGB output up front (no-ops when rendering into EffectComposer's
+// linear offscreen target on desktop, active straight to the headset in VR — zero shader recompilation on VR entry).
+const FS_END = '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n';
+const shaderMat = o => {
+  if (o.fragmentShader && o.fragmentShader.includes('gl_FragColor') && !o.fragmentShader.includes('colorspace_fragment'))
+    o.fragmentShader = o.fragmentShader.replace(/}\s*$/, FS_END + '}');
+  return new THREE.ShaderMaterial(o);
+};
+// 2-slot ping-pong RG16F wave cache: decodes (wet * height, wet) once per frame transition (on GPU when supported)
+// so shaders sample 2 hardware-bilinear textures instead of 8-16 manual texelFetches, saving ~44 MB VRAM as well.
+const _decScene = new THREE.Scene(), _decCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const _decMat = new THREE.ShaderMaterial({
+  depthTest: false, depthWrite: false,
+  uniforms: { uSrc: { value: null }, uEtaMax: { value: 1 }, uYOff: { value: 0 } },
+  vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `precision highp float; uniform sampler2D uSrc; uniform float uEtaMax; uniform int uYOff;
+void main() {
+  float c = texelFetch(uSrc, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y) - uYOff), 0).r * 255.0;
+  if (c > 0.5) { float a = (c - 128.0) / 127.0; gl_FragColor = vec4(sign(a) * a * a * uEtaMax, 1.0, 0.0, 1.0); }
+  else gl_FragColor = vec4(0.0);
+}`,
+});
+_decScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _decMat));
+function makeWaveCache(w, h, etaMax, wrapS) {
+  const count = w * h, slots = [-1, -1];
+  let texture, loadSlot;
+  if (canRenderHalfFloat) {
+    const rt = new THREE.WebGLRenderTarget(w, h * 2, {
+      format: THREE.RGFormat, type: THREE.HalfFloatType,
+      minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      depthBuffer: false, stencilBuffer: false,
+    });
+    rt.texture.wrapS = wrapS ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+    rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    const srcTex = new THREE.DataTexture(new Uint8Array(count), w, h, THREE.RedFormat, THREE.UnsignedByteType);
+    srcTex.magFilter = srcTex.minFilter = THREE.NearestFilter; srcTex.unpackAlignment = 1; srcTex.flipY = false;
+    texture = rt.texture;
+    loadSlot = (slot, idx, frames) => {
+      srcTex.image.data = frames.subarray(idx * count, (idx + 1) * count); srcTex.needsUpdate = true;
+      const prevXr = renderer.xr.enabled, prevRt = renderer.getRenderTarget(), prevAuto = renderer.autoClear;
+      renderer.xr.enabled = false; renderer.autoClear = false;
+      _decMat.uniforms.uSrc.value = srcTex; _decMat.uniforms.uEtaMax.value = etaMax; _decMat.uniforms.uYOff.value = slot * h;
+      rt.viewport.set(0, slot * h, w, h); rt.scissor.set(0, slot * h, w, h); rt.scissorTest = true;
+      renderer.setRenderTarget(rt); renderer.render(_decScene, _decCam);
+      renderer.setRenderTarget(prevRt); renderer.autoClear = prevAuto; renderer.xr.enabled = prevXr;
+    };
+  } else {
+    const lut = Uint16Array.from({ length: 256 }, (_, code) => { const a = (code - 128) / 127; return code ? THREE.DataUtils.toHalfFloat(a * Math.abs(a) * etaMax) : 0; });
+    const data = new Uint16Array(count * 4);
+    texture = new THREE.DataTexture(data, w, h * 2, THREE.RGFormat, THREE.HalfFloatType);
+    texture.wrapS = wrapS ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+    texture.magFilter = texture.minFilter = THREE.LinearFilter; texture.needsUpdate = true;
+    loadSlot = (slot, idx, frames) => {
+      const off = idx * count;
+      for (let i = 0, dst = slot * count * 2; i < count; i++, dst += 2) {
+        const code = frames[off + i]; data[dst] = lut[code]; data[dst + 1] = code ? 0x3c00 : 0;
+      }
+      texture.needsUpdate = true;
+    };
+  }
+  return {
+    texture,
+    reset() { slots[0] = slots[1] = -1; },
+    update(frames, n, first, frac, amp, outVec4) {
+      const second = Math.min(first + 1, n - 1);
+      let s0 = slots[0] === first ? 0 : slots[1] === first ? 1 : -1;
+      let s1 = slots[0] === second ? 0 : slots[1] === second ? 1 : -1;
+      if (s0 < 0) { s0 = s1 === 0 ? 1 : 0; loadSlot(s0, first, frames); slots[s0] = first; }
+      if (s1 < 0) { s1 = s0 === 0 ? 1 : 0; loadSlot(s1, second, frames); slots[s1] = second; }
+      outVec4.set(frac, s0, s1, amp);
+    },
+  };
+}
+const sweFarCache = makeWaveCache(SW.far.size, SW.far.size, SW.eta_max, false);
+const sweNearCache = makeWaveCache(SW.near.size, SW.near.size, SW.eta_max, false);
+const tFar = sweFarCache.texture, tNear = sweNearCache.texture;
 
 // a dark studio backdrop: the block is a model of the ground, not a landscape
 const SKY = { zen: new THREE.Color('#15222c'), hor: new THREE.Color('#3b4a52'), nadir: new THREE.Color('#090c0e') };
@@ -880,6 +961,7 @@ const U = {
   tLC: { value: null }, uLC: { value: 0 },                                                // land cover in true colour (pipeline/landcover.py), once loaded
   uRes: { value: new THREE.Vector4() },
   tFar: { value: tFar }, tNear: { value: tNear },
+  uSwFarMix: { value: new THREE.Vector4(0, 0, 1, 0) }, uSwNearMix: { value: new THREE.Vector4(0, 0, 1, 0) },
   uFront: { value: new THREE.Vector4(-1e9, -1e9, -1e9, -1e9) }, uFrontK: { value: new THREE.Vector4() }, uFrost: { value: new THREE.Vector4() },
   uAst: { value: new THREE.Vector4(0, 0, 0, 0) },
   uSw: { value: new THREE.Vector4(1e12, SW.far.dt, SW.far.n, SW.near.dt) },     // x: the start, once the frames are in
@@ -902,7 +984,8 @@ const GM_ROT = (() => {                                             // globe (pa
 const EARTH_M = new THREE.Matrix4().makeTranslation(EC.x, EC.y, EC.z).multiply(GM_ROT).multiply(new THREE.Matrix4().makeScale(RE_M, RE_M, RE_M));
 const EARTH_INV = EARTH_M.clone().invert(), GM_INV3 = new THREE.Matrix3().setFromMatrix4(GM_ROT).transpose();
 const worldOfLL = (lon, lat, r = 1) => toV(lon, lat, r).applyMatrix4(EARTH_M);
-function llOfWorld(v) { const q = v.clone().sub(EC).normalize().applyMatrix3(GM_INV3); return [Math.atan2(-q.z, q.x) * 180 / Math.PI, Math.asin(clamp(q.y, -1, 1)) * 180 / Math.PI]; }
+const _llv = new THREE.Vector3();
+function llOfWorld(v) { const q = _llv.copy(v).sub(EC).normalize().applyMatrix3(GM_INV3); return [Math.atan2(-q.z, q.x) * 180 / Math.PI, Math.asin(clamp(q.y, -1, 1)) * 180 / Math.PI]; }
 // the flat regional map wrapped onto the globe, and back
 function bendV(x, y, z, out = new THREE.Vector3()) {
   const d = Math.hypot(x, z); if (d < 1e-3) return out.set(x, y, z);
@@ -914,18 +997,20 @@ function unbendV(v) {                     // world -> flat map: x, height above 
   return h < 1e-6 ? { x: 0, y: r - RE_M, z: 0 } : { x: X / h * th * RE_M, y: r - RE_M, z: Z / h * th * RE_M };
 }
 const bendA = a => bendV(a.x, a.y, a.z);
+const GTW = GLB.frames.w, GTH = GLB.frames.h;
+const globeWaveCache = makeWaveCache(GTW, GTH, GLB.w.eta_max, true);
 const GU = {
-  tGE: { value: null }, tGF: { value: null }, uT: { value: -1e9 }, uGEx: { value: 25 }, uOrbit: { value: 0 },
-  uWaveMix: { value: new THREE.Vector2() }, // interpolation fraction and residual wave amplitude
+  tGE: { value: null }, tGF: { value: globeWaveCache.texture }, uT: { value: -1e9 }, uGEx: { value: 25 }, uOrbit: { value: 0 },
+  uWaveMix: { value: new THREE.Vector4(0, 0, 1, 0) }, // frac, slot0, slot1, residual wave amplitude
   uSunG: { value: sunDir.clone().applyMatrix3(GM_INV3) }, uImp: { value: IMPV },
-  uGM: { value: new THREE.Matrix3().setFromMatrix4(GM_ROT) }, uFrW: { value: new THREE.Vector4(4000, 0, 0, 0) },
+  uGM: { value: new THREE.Matrix3().setFromMatrix4(GM_ROT) }, uGMInv: { value: GM_INV3 }, uEarthInv: { value: EARTH_INV },
+  uFrW: { value: new THREE.Vector4(4000, 0, 0, 0) },
   uFrG: { value: new THREE.Vector4(-1, -1, -1, -1) }, uFrGK: { value: new THREE.Vector4() },
   tRF: { value: null }, uRF: { value: new THREE.Vector4(1, 1, 0, 0) },
   tCL: { value: null }, uCL: { value: new THREE.Vector4() }, uCLv: { value: new THREE.Vector4() }, uHaze: { value: new THREE.Color() }, uAir: { value: 1 },   // uAir 0: the atmosphere hidden (Options)
   tFire: { value: null }, uFire: { value: new THREE.Vector4(1, 1e12, 1e12, 0) },
   tWind: { value: (() => { const t = new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1); t.needsUpdate = true; return t; })() }, uWindS: { value: new THREE.Vector2(15, 25) },   // calm until pipeline/wind.py's winds are in
 };
-const GTW = GLB.frames.w, GTH = GLB.frames.h;
 const GL_COMMON = `
 uniform sampler2D tCW; uniform vec2 uCoast;
 // the fine coast (pipeline/coast.py): signed distance to the shore, land above 128/255. Its side of the shore wins;
@@ -939,10 +1024,10 @@ vec3 landAlb(vec2 uv, float h) {
   if (uLC > 0.5) return texture2D(tLC, uv).rgb;
   return mix(mix(vec3(0.36, 0.38, 0.26), vec3(0.5, 0.43, 0.32), smoothstep(150.0, 1400.0, h)), vec3(0.6, 0.58, 0.56), smoothstep(2400.0, 4000.0, h)) * 0.8;
 }
-uniform sampler2D tGE; uniform sampler2D tGF; uniform vec2 uWaveMix; uniform float uT, uGEx; uniform vec3 uSunG, uImp;
+uniform sampler2D tGE; uniform sampler2D tGF; uniform vec4 uWaveMix; uniform float uT, uGEx; uniform vec3 uSunG, uImp;
 vec2 llOf(vec3 p) { return vec2(atan(-p.z, p.x), asin(clamp(p.y, -1.0, 1.0))); }          // longitude, latitude (rad)
 vec2 uvOf(vec2 l) { return vec2(l.x / 6.2831853 + 0.5, 0.5 - l.y / 3.1415927); }
-// Two adjacent decoded frames share a texture. Filter height and wet share together,
+// Two adjacent decoded frames share a ping-pong RG16F texture. Filter height and wet share together,
 // then divide out dry neighbours so the shoreline does not damp the wave.
 float gFrame(vec2 uv, float slot) {
   float v = clamp(uv.y, 0.5 / ${GTH}.0, 1.0 - 0.5 / ${GTH}.0);
@@ -950,8 +1035,8 @@ float gFrame(vec2 uv, float slot) {
   return h.y > 0.0 ? h.x / h.y : 0.0;
 }
 float gEta(vec2 uv) {
-  if (uWaveMix.y <= 0.0) return 0.0;
-  return mix(gFrame(uv, 0.0), gFrame(uv, 1.0), uWaveMix.x) * uWaveMix.y;
+  if (uWaveMix.w <= 0.0) return 0.0;
+  return mix(gFrame(uv, uWaveMix.y), gFrame(uv, uWaveMix.z), uWaveMix.x) * uWaveMix.w;
 }
 // far-reaching effects (mirroring the script): air blast overpressure, seismic shaking, re-entry heating
 uniform vec4 uFrG, uFrGK, uRF; uniform highp sampler2DArray tRF;
@@ -960,22 +1045,26 @@ float mmiOf(float rkm) {
   float m = rkm < 60.0 ? ${M_SEIS.toFixed(3)} - 0.0238 * rkm : rkm < 700.0 ? ${M_SEIS.toFixed(3)} - 0.0048 * rkm - 1.1644 : ${M_SEIS.toFixed(3)} - 1.66 * log(rkm / 6371.0) / log(10.0) - 6.399;
   return m < 1.0 ? 0.0 : m < 2.0 ? 1.0 : m < 3.0 ? 1.5 : m < 4.0 ? 3.5 : m < 5.0 ? 4.5 : m < 6.0 ? 6.5 : m < 7.0 ? 7.5 : m < 8.0 ? 9.5 : m < 9.0 ? 10.5 : 12.0;
 }
-float rfFrame(vec2 uv, int layer) {           // re-entry heating, log10 W/m2, one 4-min frame (1 deg), bilinear, wrapping in longitude
-  vec2 p = uv * vec2(360.0, 180.0) - 0.5; ivec2 i0 = ivec2(floor(p)); vec2 f = p - floor(p); float s = 0.0;
-  for (int k = 0; k < 4; k++) {
-    ivec2 o = ivec2(k & 1, k >> 1), q = i0 + o; q.x = (q.x % 360 + 360) % 360; q.y = clamp(q.y, 0, 179);
-    float c = texelFetch(tRF, ivec3(q, layer), 0).r * 255.0;
-    s += (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) * (c < 0.5 ? 0.0 : (c - 1.0) / 254.0 * 7.0);
-  }
-  return s;
+float rfFrame(vec2 uv, float layer) {         // re-entry heating, log10 W/m2, hardware bilinear, wrapping in longitude
+  return texture(tRF, vec3(uv.x, clamp(uv.y, 0.5 / 180.0, 1.0 - 0.5 / 180.0), layer)).r * 7.0;
 }
 float rfAt(vec2 uv) {
   if (uT <= 0.0 || uRF.w < 0.5) return 0.0;
   float fr = uT / uRF.x - 0.5; if (fr > uRF.y - 1.0) return 0.0;      // log10 W/m2
   float l0 = max(floor(fr), 0.0), w = clamp(fr - l0, 0.0, 1.0);
-  return mix(rfFrame(uv, int(l0)), rfFrame(uv, int(min(l0 + 1.0, uRF.y - 1.0))), w);
+  return mix(rfFrame(uv, l0), rfFrame(uv, min(l0 + 1.0, uRF.y - 1.0)), w);
 }
-float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// ALU-only period-free hashes (avoids sin() SFU bottleneck on mobile/Quest GPUs)
+float hash2(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+vec3 hash32(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  p3 += dot(p3, p3.yxz + 33.33);
+  return fract((p3.xxy + p3.yzz) * p3.zyx);
+}
 // value noise with no period, for large-scale fields (the fires, the re-entry glow): the noise texture tiles, and from afar the repeats of
 // its wide layers line up into a lattice across a continent
 float vnz(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -995,10 +1084,10 @@ vec3 tempCol(float d) {        // colder blue to violet, warmer red (linear colo
                  : mix(c0, vec3(0.8, 0.05, 0.007), smoothstep(0.0, 8.0, d));
 }
 // shared by the globe and the regional meshes, so they meet without a seam
-uniform mat3 uGM;
+uniform mat3 uGM, uGMInv; uniform mat4 uEarthInv;
 vec2 uvOfFlat(vec2 xz) {                // a point of the regional map -> globe texture coordinates
   float d = length(xz), th = d / R_EARTH; vec2 u = d > 0.0 ? xz / d : vec2(0.0, -1.0);
-  return uvOf(llOf(transpose(uGM) * vec3(u.x * sin(th), cos(th), u.y * sin(th))));
+  return uvOf(llOf(uGMInv * vec3(u.x * sin(th), cos(th), u.y * sin(th))));
 }
 float latOfUv(vec2 uv) { return (0.5 - uv.y) * 3.1415927; }
 vec3 climateFx(vec3 col, vec2 uv, bool land, float h, vec3 light, float sunUp, float day) {
@@ -1039,7 +1128,7 @@ vec4 windAt(vec2 uv, vec2 xz) {       // xy: the 10 m wind, zw: the smoke layer'
   // sphere directly: differences of nearby texture coordinates left ~0.1% noise in the direction, which the streaks'
   // coordinates (thousands of km from the crater) turned into kilometres of jitter
   float r = length(xz), th = r / R_EARTH, sn = sin(th); vec2 u = r > 1.0 ? xz / r : vec2(1.0, 0.0);
-  mat3 M = transpose(uGM);
+  mat3 M = uGMInv;
   vec3 P = M * vec3(u.x * sn, cos(th), u.y * sn), ur = M * vec3(u.x * cos(th), -sn, u.y * cos(th)), ut = M * vec3(-u.y, 0.0, u.x);
   float lo = atan(-P.z, P.x), la = asin(clamp(P.y, -1.0, 1.0));
   vec3 e = vec3(-sin(lo), 0.0, -cos(lo)), n = vec3(-sin(la) * cos(lo), cos(la), sin(la) * sin(lo));
@@ -1049,6 +1138,8 @@ vec4 windAt(vec2 uv, vec2 xz) {       // xy: the 10 m wind, zw: the smoke layer'
   s = s.x * u + s.y * k * vec2(-u.y, u.x); m = m.x * u + m.y * k * vec2(-u.y, u.x);
   return vec4(s * length(en.xy) / max(length(s), 1e-9), m * length(en.zw) / max(length(m), 1e-9));
 }
+vec4 _fireWind = vec4(0.0); bool _hasFireWind = false;
+vec4 getWind(vec2 uv, vec2 xz) { if (!_hasFireWind) { _fireWind = windAt(uv, xz); _hasFireWind = true; } return _fireWind; }
 // The fires' own map: the regional map (azimuthal equidistant about the crater) on the crater's half of the globe, and
 // the same map about the antipode, folded onto it, on the far half. The one map squeezes the far side sideways (3x at
 // 135 deg from the crater, without limit near the antipode), which drew its fires and smoke as fine stripes; folded,
@@ -1090,13 +1181,16 @@ float fireAge(vec2 uv, vec2 xz0, bool land, float h) {    // seconds since the f
   float q = lnz(w / 181000.0 + 0.27) * 0.5 + lnz(w / 41300.0 + 0.13) * 0.3 + nz(w / 9700.0 + 0.71) * 0.2;
   fireW = smoothstep(thr, thr + 0.035, q);
   if (fireW <= 0.0) return -1.0;
+  // Once flames & smoke have died out (~5.8 days), only the charred scar remains — skip the 4x4 front-arrival search
+  if (uT > 5e5) { fireR = 0.4; return uT - tc; }
   // arrival of the nearest front: ignition points jittered in cells, each lit within the first hour of the heat. Each
   // fire grows as an ellipse from its ignition point, which stays near its back end (Van Wagner 1969): in the 10 m wind
   // U, length-to-breadth from Alexander (1985) and the head fire's rate from the Canadian system's wind function
   // (Van Wagner 1987), about 0.2 m/s in calm air and 1 m/s in a strong breeze
-  float L = storm ? 14000.0 : 26000.0, best = 1e12, bd = 0.0;
+  float L = storm ? 14000.0 : 26000.0, best = 1e12, bestTa = 1.0;
+  vec2 bestO = vec2(0.0);
   vec2 g = floor(w / L);
-  vec2 wv = fireDir(windAt(uv, xz0).xy, xz0, far); float U = length(wv) * 3.6;     // km/h
+  vec2 wv = fireDir(getWind(uv, xz0).xy, xz0, far); float U = length(wv) * 3.6;     // km/h
   vec2 dw = U > 0.36 ? wv / length(wv) : vec2(1.0, 0.0), pw = vec2(-dw.y, dw.x);
   float LB = 1.0 + 8.729 * pow(1.0 - exp(-0.030 * U), 2.155), sq = sqrt(LB * LB - 1.0);
   float rh = 0.2 * exp(0.05039 * U) * (0.55 + 0.9 * nz(w / 23100.0 + 0.4));      // m/s, varying with the fuel
@@ -1104,13 +1198,14 @@ float fireAge(vec2 uv, vec2 xz0, bool land, float h) {    // seconds since the f
   vec2 c0 = g - vec2(dw.x > 0.0 ? 2.0 : 1.0, dw.y > 0.0 ? 2.0 : 1.0);              // two cells upwind, one downwind: a head fire runs on past its neighbours
   for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
     vec2 cc = c0 + vec2(float(a), float(b));
-    vec2 pt = (cc + 0.1 + 0.8 * vec2(hash2(cc), hash2(cc + 17.31))) * L;
+    vec3 h3 = hash32(cc);
+    vec2 pt = (cc + 0.1 + 0.8 * h3.xy) * L;
     vec2 o = w - pt; float x = dot(o, dw), y = dot(o, pw);
     float ta = (sqrt(x * x * cc2 * cc2 + rr * (x * x + LB * LB * y * y)) - x * cc2) / rr;   // when this fire's ellipse reaches here
-    float tt = hash2(cc + 5.7) * 3600.0 + ta;
-    if (tt < best) { best = tt; bd = length(o) / max(ta, 1.0); }
+    float tt = h3.z * 3600.0 + ta;
+    if (tt < best) { best = tt; bestO = o; bestTa = ta; }
   }
-  fireR = bd;
+  fireR = length(bestO) / max(bestTa, 1.0);
   return uT - (tc + best);
 }
 vec3 fireScar(vec3 col, float age, vec2 xz) {      // charred ground with ash, greening again over the following years
@@ -1135,12 +1230,12 @@ float fireBurn(vec2 uv, vec2 xz) {     // the share of the ground around here bu
   return lm * cover * smoothstep(0.0, 3600.0, tt) * exp(-tt / 64800.0);
 }
 vec3 fireGlow(vec3 col, float age, float dAge, float fp, vec2 uv, vec2 xz0, vec3 light) {   // dAge: fwidth(age), fp: the pixel's size (m), from the fragment shader
-  if (uFire.x < 0.5 || uT <= (uFire.x > 1.5 ? uFire.z : uFire.y) || uT > 2e6) return col;
+  if (uFire.x < 0.5 || uT <= (uFire.x > 1.5 ? uFire.z : uFire.y) || uT > 5e5) return col;
   bool far = length(xz0) > R_HALF; vec2 xz = far ? fireFold(xz0) : xz0;          // the fires' map
   float w0 = fireW, fi = pow(clamp(fireR / 0.4, 0.05, 4.0), 0.46);              // the head fire burns fiercest: flame length ~ rate^0.46 (Byram 1959)
   // smoke: gathered from the fires upwind in the smoke layer's prevailing wind, the plume widening downwind and
   // reaching further in a stronger wind, drawn out into streaks along the wind
-  vec2 ws = fireDir(windAt(uv, xz0).zw, xz0, far); float U = length(ws);
+  vec2 ws = fireDir(getWind(uv, xz0).zw, xz0, far); float U = length(ws);
   vec2 wind = U > 0.1 ? ws / U : vec2(1.0, 0.0);
   if (uOrbit > 0.5) {
     vec2 source = xz - ws * 3600.0;
@@ -1164,14 +1259,15 @@ vec3 fireGlow(vec3 col, float age, float dAge, float fp, vec2 uv, vec2 xz0, vec3
   vec2 xw = xz + (vec2(vnz(xz / 97300.0 + 0.5), vnz(xz / 97300.0 + 5.9)) - 0.5) * 50000.0;
   float ang = atan(wind.y, wind.x), fine = smoothstep(700.0, 2800.0, fp), st = 0.0, sw = 0.0, sw2 = 0.0;
   for (int k = 0; k < 3; k++) {
-    float a = float(k) * 1.0471976, w = pow(0.5 + 0.5 * cos(2.0 * (ang - a)), 3.0);
+    float a = float(k) * 1.0471976, cw = 0.5 + 0.5 * cos(2.0 * (ang - a)), w = cw * cw * cw;
+    if (w < 0.01) continue;
     vec2 dk = vec2(cos(a), sin(a)), o = vec2(17.3, 9.1) * float(k);
     float al = dot(xw, dk) * (dot(wind, dk) < 0.0 ? -1.0 : 1.0), ac = dot(xw, vec2(-dk.y, dk.x));   // drifting downwind
     float n = vnz(vec2(al / 70000.0 - uTime * 0.0005, ac / 24000.0) + o) * 0.5 + vnz(vec2(al / 24000.0 - uTime * 0.0013, ac / 8500.0) + o + 0.7) * 0.3
             + mix(vnz(vec2(al / 7000.0 - uTime * 0.004, ac / 2800.0) + o + 0.1), 0.5, fine) * 0.2;   // fine wisps only close up
     st += w * n; sw += w; sw2 += w * w;
   }
-  st = 0.5 + (st / sw - 0.5) * sw * inversesqrt(sw2);                              // as much contrast where the patterns blend
+  st = sw > 0.0 ? 0.5 + (st / sw - 0.5) * sw * inversesqrt(sw2) : 0.5;             // as much contrast where the patterns blend
   sm = clamp(sm / 3.4 * (0.15 + 1.3 * st), 0.0, 1.0) * uAir;                     // (no smoke shaped like each burnt patch; none with the atmosphere hidden)
   // flames: a thin front; beyond a pixel's width it spreads its light over the pixel (no shimmer from afar)
   vec3 add = vec3(0.0);
@@ -1227,16 +1323,21 @@ uniform vec4 uFront, uFrontK, uFrost, uFrW, uAst;   // uAst: the asteroid in the
 //      // radii of the P, S, surface-wave and air-blast fronts (m); their strengths
 vec3 frontsGlow(float r) {
   if (uFrontK.w < 0.5) return vec3(0.0);
-  float w = uFrW.x;
-  return vec3(0.5, 0.8, 1.0) * exp(-pow((r - uFront.x) / w, 2.0)) * 0.6 * uFrontK.x
-       + vec3(1.0, 0.85, 0.4) * exp(-pow((r - uFront.y) / w, 2.0)) * 0.6 * uFrontK.x
-       + vec3(1.0, 0.45, 0.2) * exp(-pow((r - uFront.z) / (2.0 * w), 2.0)) * uFrontK.y
-       + vec3(0.9, 0.95, 1.0) * exp(-pow((r - uFront.w) / (1.5 * w), 2.0)) * uFrontK.z;
+  float w = uFrW.x, iw = 1.0 / w;
+  vec3 c = vec3(0.0);
+  if (uFrontK.x > 0.001) {
+    float dx = (r - uFront.x) * iw, dy = (r - uFront.y) * iw;
+    c += (vec3(0.5, 0.8, 1.0) * exp(-dx * dx) + vec3(1.0, 0.85, 0.4) * exp(-dy * dy)) * 0.6 * uFrontK.x;
+  }
+  if (uFrontK.y > 0.001) { float dz = (r - uFront.z) * (0.5 * iw); c += vec3(1.0, 0.45, 0.2) * exp(-dz * dz) * uFrontK.y; }
+  if (uFrontK.z > 0.001) { float dw = (r - uFront.w) * (0.6666667 * iw); c += vec3(0.9, 0.95, 1.0) * exp(-dw * dw) * uFrontK.z; }
+  return c;
 }
 vec2 tgt(vec2 xz) { return texture2D(tTgt, (xz + uHalf) / (2.0 * uHalf)).rg; }          // 66 Ma water depth, sediment pile (m)
 float waterDepth(float w66) { return mix(-120.0, mix(min(w66, 45.0), w66, uG), uFlood); }
 // crater deformation (mirrors Wd() in the script): vertical displacement of rock that started d m below the seafloor
 float terrace(float r) {
+  if (r <= 44000.0) return 0.0;
   float s = 0.0;
   for (int k = 0; k < 4; k++) { float rk = 56000.0 + 10000.0 * float(k); s += 1.0 - smoothstep(rk - 700.0, rk + 700.0, r); }
   float tilt = r > 56000.0 && r < 96000.0 ? 0.25 * fract((r - 56000.0) / 10000.0) : 0.0;
@@ -1259,7 +1360,11 @@ vec3 deposits(float r, float S, float sf0) {
   float ej = 300.0 * pow(max(r, 90000.0) / 95000.0, -3.0) * (1.0 - smoothstep(uDepB.y - 15000.0, uDepB.y + 1.0, r)) * smoothstep(82000.0, 96000.0, r) * (1.0 - smoothstep(110000.0, 165000.0, r));
   return vec3(uDepA.x * exp(-y * y), uDepA.z * mix(lining, pool, uDepA.w), inner + ej);
 }
-float topAt(vec2 xz) { float sf0 = -waterDepth(tgt(xz).r), r = length(xz), S = zOf(sf0, r, dexAt(r)); vec3 dp = deposits(r, S, sf0); return S + dp.x + dp.y + dp.z; }
+float topAt(vec2 xz) {
+  float sf0 = -waterDepth(tgt(xz).r);
+  if (uImpC.z < 0.5) return sf0;
+  float r = length(xz), S = zOf(sf0, r, dexAt(r)); vec3 dp = deposits(r, S, sf0); return S + dp.x + dp.y + dp.z;
+}
 float elevAt(vec2 xz) { return topAt(xz); }
 uniform sampler2D tGulf; uniform float uGHalf; uniform vec4 uRes;   // uRes: -, resurge NNE bias, bore height, seiche
 vec4 gulf(vec2 xz) { return texture2D(tGulf, (xz + uGHalf) / (2.0 * uGHalf)); }   // today's elevation, crest arrival (s), crest height, land
@@ -1269,28 +1374,21 @@ float tsunami(vec4 g) {
   float x = tau / (330.0 + g.g * 0.02);
   return g.b * (exp(-x * x) - 0.6 * exp(-(x - 1.8) * (x - 1.8)) + 0.35 * exp(-(x - 3.6) * (x - 3.6)) - 0.2 * exp(-(x - 5.4) * (x - 5.4)));
 }
-uniform highp sampler2DArray tFar, tNear;
-uniform vec4 uSw, uSw2;          // sim start, far dt, far frames, near dt | near frames, near half-size, far half-size, height scale
-// one frame of the simulated sea, wet-weighted bilinear: (surface height, wet fraction)
-vec2 sweFrame(highp sampler2DArray tex, int size, float hs, vec2 xz, int layer) {
-  vec2 p = (xz + hs) / (2.0 * hs) * float(size) - 0.5;
-  ivec2 i0 = ivec2(floor(p)); vec2 f = p - floor(p);
-  float sw = 0.0, se = 0.0;
-  for (int k = 0; k < 4; k++) {
-    ivec2 o = ivec2(k & 1, k >> 1), q = clamp(i0 + o, ivec2(0), ivec2(size - 1));
-    float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
-    float c = texelFetch(tex, ivec3(q, layer), 0).r * 255.0;
-    if (c > 0.5) { float a = (c - 128.0) / 127.0; sw += w; se += w * sign(a) * a * a * uSw2.w; }
-  }
-  return vec2(sw > 0.0 ? se / sw : 0.0, sw);
+uniform sampler2D tFar, tNear;
+uniform vec4 uSw, uSw2, uSwFarMix, uSwNearMix;   // uSw*Mix: frac, slot0, slot1, settleAmp
+// one frame of the simulated sea, hardware-bilinear from 2-slot RG16F cache: (surface height, wet fraction)
+vec2 sweSampleSlot(sampler2D tex, float size, float hs, vec2 xz, float slot) {
+  vec2 uv = (xz + hs) / (2.0 * hs);
+  float halfTex = 0.5 / size;
+  vec2 u = vec2(clamp(uv.x, halfTex, 1.0 - halfTex), (clamp(uv.y, halfTex, 1.0 - halfTex) + slot) * 0.5);
+  vec2 d = texture2D(tex, u).rg;
+  return vec2(d.y > 0.0 ? d.x / d.y : 0.0, d.y);
 }
 vec2 sweLevel(bool near, vec2 xz) {
-  float dt = near ? uSw.w : uSw.y, n = near ? uSw2.x : uSw.z;
-  float fr = clamp((uImpC.w - uSw.x) / dt, 0.0, n - 1.0), l0 = floor(fr), w = fr - l0;
-  int a0 = int(l0), a1 = int(min(l0 + 1.0, n - 1.0));
-  vec2 a = near ? sweFrame(tNear, ${SW.near.size}, uSw2.y, xz, a0) : sweFrame(tFar, ${SW.far.size}, uSw2.z, xz, a0);
-  vec2 b = near ? sweFrame(tNear, ${SW.near.size}, uSw2.y, xz, a1) : sweFrame(tFar, ${SW.far.size}, uSw2.z, xz, a1);
-  return vec2(a.y > 0.0 && b.y > 0.0 ? mix(a.x, b.x, w) : (a.y > 0.0 ? a.x : b.x), mix(a.y, b.y, w));
+  vec4 m = near ? uSwNearMix : uSwFarMix;
+  vec2 a = near ? sweSampleSlot(tNear, ${SW.near.size}.0, uSw2.y, xz, m.y) : sweSampleSlot(tFar, ${SW.far.size}.0, uSw2.z, xz, m.y);
+  vec2 b = near ? sweSampleSlot(tNear, ${SW.near.size}.0, uSw2.y, xz, m.z) : sweSampleSlot(tFar, ${SW.far.size}.0, uSw2.z, xz, m.z);
+  return vec2(a.y > 0.0 && b.y > 0.0 ? mix(a.x, b.x, m.x) : (a.y > 0.0 ? a.x : b.x), mix(a.y, b.y, m.x));
 }
 vec2 swe(vec2 xz) {                 // fine frames around the crater, coarse ones beyond, blended over 25 km
   float edge = uSw2.y - 3000.0 - max(abs(xz.x), abs(xz.y));
@@ -1308,16 +1406,17 @@ float nearRing(vec2 xz) {
   return A * (exp(-q * q) - 0.5 * exp(-(q - 1.6) * (q - 1.6)));
 }
 bool simOn() { return uImpC.z > 0.5 && uImpC.w >= uSw.x; }
-float settle() { return exp(-max(uImpC.w - uSw.x - (uSw.z - 1.0) * uSw.y, 0.0) / 43200.0); }   // the sea calms after the simulated 10 h
-bool wetAt(vec2 xz) {
-  if (uImpC.z < 0.5) return true;
-  if (simOn()) return swe(xz).y > 0.5;
-  return length(xz) > uDepB.z;
+float settle() { return uSwFarMix.w; }
+vec2 seaState(vec2 xz) {            // (height, wet) in a single SWE lookup
+  if (uImpC.z < 0.5) return vec2(0.0, 1.0);
+  if (simOn()) { vec2 s = swe(xz); return vec2(s.x * uSwFarMix.w, s.y); }
+  return vec2(nearRing(xz), length(xz) > uDepB.z ? 1.0 : 0.0);
 }
+bool wetAt(vec2 xz) { return seaState(xz).y > 0.5; }
 // sea-surface height: the rim wave, then the simulated resurge and tsunami
 float seaH(vec2 xz) {
   if (uImpC.z < 0.5) return 0.0;
-  return simOn() ? swe(xz).x * settle() : nearRing(xz);
+  return simOn() ? swe(xz).x * uSwFarMix.w : nearRing(xz);
 }
 // starting layer of rock that began d m below a seafloor at sf0: 1-4 sediments, 5 upper crust, 6 lower crust, 7 mantle
 int layerAt(vec2 t, float sf0, float d) {
@@ -1333,12 +1432,13 @@ int materialAt(vec2 xz, float e, out float sf0, out float d) {
   if (e > S) {
     vec3 dp = deposits(r, S, sf0); float a = S + dp.x, b = a + dp.y, c = b + dp.z;
     if (e <= a) return 9; if (e <= b) return 8; if (e <= c) return 10;
-    return e <= seaH(xz) && wetAt(xz) ? 0 : -1;
+    vec2 ss = seaState(xz);
+    return e <= ss.x && ss.y > 0.5 ? 0 : -1;
   }
   if (uImpC.z < 0.5 || r > 150000.0) d = sf0 - e;
   else {                                    // displacement shrinks with depth slower than depth grows, so z(d) is monotonic
     float lo = de, hi = 70000.0;
-    for (int i = 0; i < 18; i++) { float m = 0.5 * (lo + hi); if (zOf(sf0, r, m) > e) lo = m; else hi = m; }
+    for (int i = 0; i < 14; i++) { float m = 0.5 * (lo + hi); if (zOf(sf0, r, m) > e) lo = m; else hi = m; }
     d = 0.5 * (lo + hi);
   }
   return layerAt(t, sf0, d);
@@ -1358,7 +1458,7 @@ vec3 astLight(vec3 p, vec3 n) {      // light from the asteroid's shock-heated a
   vec3 d = uAst.xyz - p; float r2 = dot(d, d);
   return vec3(1.0, 0.86, 0.7) * uAst.w * 6.0e9 * max(dot(n, d * inversesqrt(r2)), 0.0) / (r2 + 2.0e8);
 }
-vec3 fogIt(vec3 c, float dist) { float f = 1.0 - exp(-pow(dist * uFogD, 2.0)); return mix(c, uFogCol, f); }
+vec3 fogIt(vec3 c, float dist) { float fd = dist * uFogD; float f = 1.0 - exp(-fd * fd); return mix(c, uFogCol, f); }
 // seen through water: light crosses it twice; clear seawater takes red within metres, green within tens of metres
 vec3 waterCol(float d) { return mix(vec3(0.045, 0.27, 0.31), vec3(0.008, 0.035, 0.075), 1.0 - exp(-d / 650.0)) + vec3(0.06, 0.15, 0.15) * exp(-d / 45.0); }
 vec3 ambient(vec3 n) { return mix(uGndCol, uSkyCol, 0.5 + 0.5 * n.y); }
@@ -1384,23 +1484,21 @@ vec3 rockCol(int id, float e, float h) {
 float contact(float e, float b) { return 1.0 - smoothstep(0.6, 1.6, abs(e - b) / fwidth(e)); }
 `;
 
-const VS_HEAD = '#include <common>\n#include <logdepthbuf_pars_vertex>\n';
-const FS_HEAD = '#include <logdepthbuf_pars_fragment>\n';
+const VS_HEAD = '#include <common>\n';
+const FS_HEAD = '';
 
 // block faces: walls, the cut face and the base share one shader
-const rockMat = new THREE.ShaderMaterial({
+const rockMat = shaderMat({
   uniforms: U, side: THREE.DoubleSide, extensions: { derivatives: true },
   vertexShader: VS_HEAD + COMMON + `
 varying vec3 vW, vN; varying float vDist;
 void main() {
   vec4 wp = modelMatrix * vec4(position, 1.0); vW = wp.xyz; vN = normalize(mat3(modelMatrix) * normal);
   wp.y *= uExag; wp.xyz = bend(wp.xyz); vec4 mv = viewMatrix * wp; vDist = -mv.z; gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + ROCK + `
 varying vec3 vW, vN; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
   vec2 xz = vW.xz;
 #ifdef WALL
   if (outside(xz)) discard;          // walls and base line the pit left by the cut
@@ -1439,7 +1537,7 @@ void main() {
 // seafloor (or land) surface
 const NS = SMALL ? 384 : 640;
 const surfGeom = new THREE.PlaneGeometry(2 * HALF, 2 * HALF, NS, NS).rotateX(-Math.PI / 2);
-const surfMat = new THREE.ShaderMaterial({
+const surfMat = shaderMat({
   uniforms: U, extensions: { derivatives: true },
   vertexShader: VS_HEAD + COMMON + `
 varying vec3 vW, vN; varying float vDist;
@@ -1450,12 +1548,10 @@ void main() {
   vN = normalize(vec3((elevAt(xz - vec2(e, 0.0)) - elevAt(xz + vec2(e, 0.0))) * uExag, 2.0 * e, (elevAt(xz - vec2(0.0, e)) - elevAt(xz + vec2(0.0, e))) * uExag));
   vW = vec3(xz.x, h, xz.y);
   vec4 mv = viewMatrix * vec4(bend(vec3(xz.x, h * uExag, xz.y)), 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + GL_COMMON + `
 varying vec3 vW, vN; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
   if (cutAway(vW.xz) || !inBlock(vW.xz)) discard;
   vec2 t = tgt(vW.xz); float sf0 = -waterDepth(t.r), r = length(vW.xz);
   vec3 dp = deposits(r, zOf(sf0, r, dexAt(r)), sf0);
@@ -1463,40 +1559,41 @@ void main() {
   int id = dp.z > 5.0 ? 10 : below;
   vec3 brec = uLith[10] * (0.8 + 0.4 * nz(vW.xz / 2500.0 + 0.2));
   vec3 alb = mix(uLith[below], brec, smoothstep(5.0, 150.0, dp.z)) * (0.86 + 0.2 * nz(vW.xz / 60000.0) + 0.1 * nz(vW.xz / 7000.0 + 0.4));
-  float top = vW.y, wd = wetAt(vW.xz) ? seaH(vW.xz) - top : 0.0;
+  vec2 ss = seaState(vW.xz);
+  float top = vW.y, wd = ss.y > 0.5 ? ss.x - top : 0.0;
   if (top > 0.0 && uImpC.z < 0.5) alb *= vec3(0.86, 0.8, 0.7);                       // weathered land
   vec3 n = normalize(vN);
-  vec3 col = alb * (uSunCol * max(dot(n, uSunDir), 0.0) * 0.5 + ambient(n) * 1.1);
+  vec3 light = uSunCol * max(dot(n, uSunDir), 0.0) * 0.5 + ambient(n) * 1.1;
+  vec3 col = alb * light;
   if (id == 8) { float v = nz(vW.xz / 14000.0 + uTime * 0.002) * nz(vW.xz / 5200.0 + 0.6); col += vec3(1.0, 0.28, 0.05) * uDepB.w * (0.12 + 2.6 * smoothstep(0.22, 0.5, v)); }   // dark crust, glowing cracks
   col += alb * astLight(vec3(vW.x, top * uExag, vW.z), n);
   if (wd > 0.0) { vec3 att = exp(-2.0 * wd * vec3(0.22, 0.045, 0.018)); col = col * att + waterCol(wd) * (1.0 - att.g); }
-  vec2 uvG = uvOfFlat(vW.xz); col = climateFx(col, uvG, wd <= 0.0 && top > 0.0, top, uSunCol * max(dot(n, uSunDir), 0.0) * 0.5 + ambient(n) * 1.1, uSunDir.y, 1.0); col = reentryFx(col, uvG);
-  col += frontsGlow(length(vW.xz));
+  vec2 uvG = uvOfFlat(vW.xz); col = climateFx(col, uvG, wd <= 0.0 && top > 0.0, top, light, uSunDir.y, 1.0); col = reentryFx(col, uvG);
+  col += frontsGlow(r);
   gl_FragColor = vec4(fogIt(col, vDist), 1.0);
 }`,
 });
 const surf = new THREE.Mesh(surfGeom, surfMat); surf.frustumCulled = false; scene.add(surf);
 
 // sea surface
-const seaMat = new THREE.ShaderMaterial({
+const seaMat = shaderMat({
   uniforms: U, transparent: true, depthWrite: false, extensions: { derivatives: true },
+  polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
   vertexShader: VS_HEAD + COMMON + `
 varying vec3 vW, vP, vB; varying float vDist;
 void main() {
   float h = seaH(position.xz); vW = vec3(position.x, h, position.z); vP = vec3(position.x, h * uExag, position.z); vB = bend(vP);
   vec4 mv = viewMatrix * vec4(vB, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + GL_COMMON + `
 varying vec3 vW, vP, vB; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
   if (cutAway(vW.xz) || !inBlock(vW.xz) || !wetAt(vW.xz) || topAt(vW.xz) >= vW.y) discard;
   vec2 q = vW.xz / 2600.0;
   vec2 g = vec2(nz(q + vec2(uTime * 0.004, 0.0)) - nz(q * 1.7 - vec2(0.0, uTime * 0.003) + 0.3), nz(q + 0.5 - vec2(uTime * 0.003)) - nz(q * 2.3 + 0.8)) * 0.18;
   vec3 fn = normalize(cross(dFdx(vP), dFdy(vP))); if (fn.y < 0.0) fn = -fn;
   vec3 n = normalize(fn + vec3(g.x, 0.0, g.y)), V = toFlat(normalize(cameraPosition - vB), vW.xz);
-  float fr = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+  float f1 = 1.0 - max(dot(n, V), 0.0), f2 = f1 * f1, fr = 0.02 + 0.98 * f2 * f2 * f1;
   vec3 R = reflect(-V, n);
   vec3 sky = mix(uHor, uZen, clamp(R.y * 1.6, 0.0, 1.0)) * 1.4;
   float spec = pow(max(dot(R, uSunDir), 0.0), 350.0) * 5.0;
@@ -1505,8 +1602,8 @@ void main() {
   if (uAst.w > 0.0) { vec3 da = normalize(uAst.xyz - vP); col += vec3(1.0, 0.86, 0.7) * uAst.w * 40.0 * pow(max(dot(R, da), 0.0), 60.0) + astLight(vP, n) * 0.25; }   // its glare on the water
   vec2 uvG = uvOfFlat(vW.xz); float kt = tsunamiK(vW.y);
   col = tsunamiTint(col, vW.y); col = climateFx(col, uvG, false, 0.0, vec3(1.0), uSunDir.y, 1.0); col = reentryFx(col, uvG);
-  col += frontsGlow(length(vW.xz));
-  gl_FragColor = vec4(fogIt(col, vDist), clamp(max(0.1 + 0.85 * fr + spec + 0.35 * abs(k) + length(frontsGlow(length(vW.xz))), kt * 0.8), 0.0, 1.0));
+  vec3 fg = frontsGlow(length(vW.xz)); col += fg;
+  gl_FragColor = vec4(fogIt(col, vDist), clamp(max(0.1 + 0.85 * fr + spec + 0.35 * abs(k) + length(fg), kt * 0.8), 0.0, 1.0));
 }`,
 });
 const sea = new THREE.Mesh(new THREE.PlaneGeometry(2 * HALF, 2 * HALF, SMALL ? 180 : 300, SMALL ? 180 : 300).rotateX(-Math.PI / 2), seaMat);
@@ -1521,29 +1618,34 @@ float gEdge(vec2 xz) { return smoothstep(-W_GULF, 0.0, gulfSD(xz)); }     // 0 i
 // (a: the coarse grids' land share)
 uniform sampler2D tCG;
 float gulfH(vec2 xz, float hc) { return uCoast.x > 0.5 ? coastH(texture2D(tCG, (xz + uGHalf) / (2.0 * uGHalf)).r, hc) : hc; }
-vec4 gulfMixAt(vec2 xz, bool fine) {
+vec4 gulfMixAtUv(vec2 xz, vec2 uv, bool fine) {
   vec4 g = gulf(xz); float f = gEdge(xz);
   if (fine) g.r = gulfH(xz, g.r);
   if (f <= 0.0) return g;
-  vec2 uv = uvOfFlat(xz); vec4 e = texture2D(tGE, uv); if (fine) e.r = globeH(uv, e.r);
+  vec4 e = texture2D(tGE, uv); if (fine) e.r = globeH(uv, e.r);
   return vec4(mix(g.r, e.r, f), f > 0.5 ? 1e9 : g.g, g.b * (1.0 - f), mix(g.a, e.a, f));
 }
-vec4 gulfMix(vec2 xz) { return gulfMixAt(xz, false); }        // the relief, on the grids
-vec4 gulfMixF(vec2 xz) { return gulfMixAt(xz, true); }        // with the fine coast: land, sea and shore colours
+vec4 gulfMix(vec2 xz) {
+  vec4 g = gulf(xz); float f = gEdge(xz);
+  if (f <= 0.0) return g;
+  vec4 e = texture2D(tGE, uvOfFlat(xz));
+  return vec4(mix(g.r, e.r, f), f > 0.5 ? 1e9 : g.g, g.b * (1.0 - f), mix(g.a, e.a, f));
+}
 float gExag(vec2 xz, float h) { return h > 0.0 ? mix(uExag, uGEx, gEdge(xz)) : uExag; }   // land relief as the globe draws it, at the edge
 // water surface over a Gulf cell: (surface height, wet); the global tsunami takes over toward the edge
 // (g.r: the ground that decides land and sea; calming after the simulated 10 h, as over the block)
-vec2 gulfWater(vec2 xz, vec4 g) {
+vec2 gulfWaterUv(vec2 xz, vec2 uv, vec4 g) {
   bool land = g.r > 0.0;
   vec2 s = simOn() ? swe(xz) * vec2(settle(), 1.0) : (land ? vec2(0.0, 0.0) : vec2(seaH(xz), 1.0));
   // where the fine coast has sea but the 2.4 km simulation had land: water at rest
   if (simOn() && !land && s.y < 0.5 && g.a > 0.25) s = vec2(s.y > 0.0 ? s.x : 0.0, 1.0);
   float f = gEdge(xz); if (f <= 0.0) return s;
-  return vec2(mix(s.x, gEta(uvOfFlat(xz)), f), f > 0.5 ? (land ? 0.0 : 1.0) : s.y);
-}`;
+  return vec2(mix(s.x, gEta(uv), f), f > 0.5 ? (land ? 0.0 : 1.0) : s.y);
+}
+vec2 gulfWater(vec2 xz, vec4 g) { return gulfWaterUv(xz, gEdge(xz) > 0.0 ? uvOfFlat(xz) : vec2(0.0), g); }`;
 const gulfGeom = new THREE.PlaneGeometry(2 * GHALF, 2 * GHALF, GSEG, GSEG).rotateX(-Math.PI / 2);
 // the ground: 66 Ma land and seafloor at their real depth, like the block's surface
-const gulfMesh = new THREE.Mesh(gulfGeom, new THREE.ShaderMaterial({
+const gulfMesh = new THREE.Mesh(gulfGeom, shaderMat({
   uniforms: { ...U, ...gulfFill }, extensions: { derivatives: true },
   vertexShader: VS_HEAD + COMMON + GL_COMMON + GULF_COMMON + `
 varying vec3 vW, vN, vB; varying float vDist;
@@ -1553,20 +1655,19 @@ void main() {
   vN = normalize(vec3(gh(xz - vec2(e, 0.0)) - gh(xz + vec2(e, 0.0)), 2.0 * e, gh(xz - vec2(0.0, e)) - gh(xz + vec2(0.0, e))));
   vW = vec3(xz.x, y, xz.y); vB = bend(vec3(xz.x, y * gExag(xz, y), xz.y));
   vec4 mv = viewMatrix * vec4(vB, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + GL_COMMON + GULF_COMMON + `
 uniform float uFill;
 uniform float uFloodTint;
 varying vec3 vW, vN, vB; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
   float gsd = gulfSD(vW.xz); if (vW.y < 0.0 && abs(gsd) < 150000.0) gsd = gulfSD(seaCrossXZ(vB));     // seabed: decide where the sight line crosses sea level
   if (gsd > 0.0 || (inBlock(vW.xz) && !(uFill > 0.5 && cutAway(vW.xz)))) discard;   // the block and the globe draw their own parts; from far away the Gulf fills the cut
-  vec4 g = gulfMixF(vW.xz); vec2 s = gulfWater(vW.xz, g);
+  vec2 uvG = uvOfFlat(vW.xz);
+  vec4 g = gulfMixAtUv(vW.xz, uvG, true); vec2 s = gulfWaterUv(vW.xz, uvG, g);
   float ground = g.r, wd = s.y > 0.5 ? s.x - ground : 0.0;
   vec3 n = normalize(vN);
-  vec3 alb = ground > 0.0 ? landAlb(uvOfFlat(vW.xz), ground) : uLith[1] * 0.5;       // wet sediment on the seabed
+  vec3 alb = ground > 0.0 ? landAlb(uvG, ground) : uLith[1] * 0.5;       // wet sediment on the seabed
   alb *= 0.86 + 0.2 * nz(vW.xz / 60000.0) + 0.1 * nz(vW.xz / 7000.0 + 0.4);
   vec3 sd = uSunDir;                                        // every place is lit as the crater is: no night side
   vec3 light = uSunCol * max(dot(n, sd), 0.0) * 0.5 + ambient(n) * 1.1 + astLight(vec3(vW.x, vW.y * uExag, vW.z), n), col = alb * light;
@@ -1574,13 +1675,14 @@ void main() {
   // grey-brown, as fresh tsunami mud is; plants take it back over within about a decade
   if (uFloodTint > 0.5 && ground > 0.0 && g.b > 0.5 && g.g < 64000.0 && uImpC.z > 0.5 && uImpC.w >= g.g) {
     col = mix(col, vec3(0.24, 0.15, 0.075) * light, (0.82 + 0.15 * smoothstep(0.5, 25.0, g.b)) * (1.0 - smoothstep(3.0e7, 3.8e8, uImpC.w)));
-    col += vec3(1.0, 0.6, 0.25) * 0.6 * exp(-pow((uImpC.w - g.g) / 400.0, 2.0));          // a flash as the water comes ashore
+    float df = (uImpC.w - g.g) / 400.0;
+    col += vec3(1.0, 0.6, 0.25) * 0.6 * exp(-df * df);          // a flash as the water comes ashore
   }
   if (wd > 0.05) {
     if (ground > 0.0) col = mix(col, vec3(0.3, 0.27, 0.2), 0.55 * smoothstep(0.3, 6.0, wd));                    // muddy flood water over land
     vec3 att = exp(-2.0 * wd * vec3(0.22, 0.045, 0.018)); col = col * att + waterCol(wd) * (1.0 - att.g);
   }
-  vec2 uvG = uvOfFlat(vW.xz); float fa = ground > 0.0 && wd <= 0.05 ? fireAge(uvG, vW.xz, true, ground) : -1.0; col = fireScar(col, fa, vW.xz);
+  float fa = ground > 0.0 && wd <= 0.05 ? fireAge(uvG, vW.xz, true, ground) : -1.0; col = fireScar(col, fa, vW.xz);
   col = climateFx(col, uvG, ground > 0.0 && wd <= 0.05, ground, light, sd.y, 1.0); col = fireGlow(col, fa, fwidth(fa), length(fwidth(vW.xz)), uvG, vW.xz, light); col = reentryFx(col, uvG);
   col += frontsGlow(length(vW.xz));
   gl_FragColor = vec4(fogIt(col, vDist), 1.0);
@@ -1588,39 +1690,42 @@ void main() {
 }));
 gulfMesh.frustumCulled = false; scene.add(gulfMesh);
 // the sea surface over the Gulf, the same as over the block
-const gulfSea = new THREE.Mesh(gulfGeom, new THREE.ShaderMaterial({
+const gulfSea = new THREE.Mesh(gulfGeom, shaderMat({
   uniforms: { ...U, ...gulfFill }, transparent: true, depthWrite: false, extensions: { derivatives: true },
+  polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
   vertexShader: VS_HEAD + COMMON + GL_COMMON + GULF_COMMON + `
-varying vec3 vW, vP, vB; varying float vDist; varying vec2 vS;
+varying vec3 vW, vP, vB; varying float vDist;
 void main() {
   vec2 xz = position.xz; vec4 g = gulfMix(xz); vec2 s = gulfWater(xz, g);
   float y = s.y > 0.5 ? s.x : min(g.r, 0.0);       // coarse land: at sea level, under the ground (the fine coast may put sea there)
-  vW = vec3(xz.x, y, xz.y); vP = vec3(xz.x, y * uExag, xz.y); vS = s; vB = bend(vP);
+  vW = vec3(xz.x, y, xz.y); vP = vec3(xz.x, y * uExag, xz.y); vB = bend(vP);
   vec4 mv = viewMatrix * vec4(vB, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + GL_COMMON + GULF_COMMON + `
 uniform float uFill;
-varying vec3 vW, vP, vB; varying float vDist; varying vec2 vS;
+varying vec3 vW, vP, vB; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
   if (gulfSD(vW.xz) > 0.0 || (inBlock(vW.xz) && !(uFill > 0.5 && cutAway(vW.xz)))) discard;
-  vec4 g = gulfMixF(vW.xz); vec2 s = gulfWater(vW.xz, g);
+  vec2 uvG = uvOfFlat(vW.xz);
+  vec4 g = gulfMixAtUv(vW.xz, uvG, true);
   float ground = g.r;
+  if (!simOn() && ground > 0.0) discard;
+  vec2 s = gulfWaterUv(vW.xz, uvG, g);
   if (s.y < 0.5 || s.x <= ground + 0.05) discard;
   vec3 fn = normalize(cross(dFdx(vP), dFdy(vP))); if (fn.y < 0.0) fn = -fn;
   vec2 q = vW.xz / 2600.0;
   vec2 gq = vec2(nz(q + vec2(uTime * 0.004, 0.0)) - nz(q * 1.7 - vec2(0.0, uTime * 0.003) + 0.3), nz(q + 0.5 - vec2(uTime * 0.003)) - nz(q * 2.3 + 0.8)) * 0.18;
   vec3 sd = uSunDir;                                        // every place is lit as the crater is: no night side
   vec3 n = normalize(fn + vec3(gq.x, 0.0, gq.y)), V = toFlat(normalize(cameraPosition - vB), vW.xz);
-  float fr = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+  float f1 = 1.0 - max(dot(n, V), 0.0), f2 = f1 * f1, fr = 0.02 + 0.98 * f2 * f2 * f1;
   vec3 R = reflect(-V, n);
   float spec = pow(max(dot(R, sd), 0.0), 350.0) * 5.0 * (1.0 - uFrW.y), k = clamp(s.x / 300.0, -1.0, 1.0);   // glint: see the globe's
   vec3 col = mix(uHor, uZen, clamp(R.y * 1.6, 0.0, 1.0)) * 1.4 + uSunCol * spec + vec3(1.0, 0.62, 0.34) * max(k, 0.0) * 0.6;
   if (uAst.w > 0.0) { vec3 da = normalize(uAst.xyz - vP); col += vec3(1.0, 0.86, 0.7) * uAst.w * 40.0 * pow(max(dot(R, da), 0.0), 60.0); }
-  float front = g.g < 64000.0 && uImpC.z > 0.5 ? exp(-pow((uImpC.w - g.g) / 120.0, 2.0)) : 0.0;     // the leading edge
+  float dtg = (uImpC.w - g.g) / 120.0;
+  float front = g.g < 64000.0 && uImpC.z > 0.5 ? exp(-dtg * dtg) : 0.0;     // the leading edge
   col += vec3(1.0, 0.88, 0.7) * front * 0.8;
-  vec2 uvG = uvOfFlat(vW.xz); float kt = tsunamiK(s.x);
+  float kt = tsunamiK(s.x);
   col = tsunamiTint(col, s.x); col = climateFx(col, uvG, false, 0.0, vec3(1.0), sd.y, 1.0); col = reentryFx(col, uvG);
   vec3 fg = frontsGlow(length(vW.xz)); col += fg;
   gl_FragColor = vec4(fogIt(col, vDist), clamp(max(0.1 + 0.85 * fr + spec + 0.35 * abs(k) + 0.5 * front + length(fg), kt * 0.8), 0.0, 1.0));
@@ -1636,17 +1741,18 @@ function quad(a, b, normal, y0, y1) {          // vertical quad from xz point a 
   g.setAttribute('normal', new THREE.Float32BufferAttribute([...normal, ...normal, ...normal, ...normal], 3));
   g.setIndex([0, 1, 2, 0, 2, 3]); return g;
 }
-const wallMat = new THREE.ShaderMaterial({ uniforms: U, side: THREE.DoubleSide, extensions: { derivatives: true }, defines: { WALL: 1 }, vertexShader: rockMat.vertexShader, fragmentShader: rockMat.fragmentShader });   // shares the live uniforms
+const wallMat = shaderMat({ uniforms: U, side: THREE.DoubleSide, extensions: { derivatives: true }, defines: { WALL: 1 }, vertexShader: rockMat.vertexShader, fragmentShader: rockMat.fragmentShader });   // shares the live uniforms
 const TOPY = 16000;                 // high enough for the central uplift at its peak
+const blockWalls = new THREE.Group(); scene.add(blockWalls);
 for (const [a, b, nn] of [[[-HALF, -HALF], [HALF, -HALF], [0, 0, -1]], [[HALF, HALF], [-HALF, HALF], [0, 0, 1]],
                           [[-HALF, HALF], [-HALF, -HALF], [-1, 0, 0]], [[HALF, -HALF], [HALF, HALF], [1, 0, 0]]]) {
-  const m = new THREE.Mesh(quad(a, b, nn, -BOTTOM, TOPY), wallMat); m.frustumCulled = false; scene.add(m);
+  const m = new THREE.Mesh(quad(a, b, nn, -BOTTOM, TOPY), wallMat); m.frustumCulled = false; blockWalls.add(m);
 }
-{
+const blockBase = (() => {
   const g = new THREE.PlaneGeometry(2 * HALF, 2 * HALF).rotateX(Math.PI / 2); g.translate(0, -BOTTOM, 0);
-  const m = new THREE.Mesh(g, wallMat); m.frustumCulled = false; scene.add(m);
-}
-const face = new THREE.Mesh(quad([-HALF * 1.5, 0], [HALF * 1.5, 0], [0, 0, 1], -BOTTOM, TOPY), rockMat);
+  const m = new THREE.Mesh(g, wallMat); m.frustumCulled = false; scene.add(m); return m;
+})();
+const face = new THREE.Mesh(quad([-150000, 0], [150000, 0], [0, 0, 1], -BOTTOM, TOPY), rockMat);
 // the curved wall of the cutaway: a half-cylinder on the removed side (+x before rotation), facing in
 const pitWall = (() => {
   const R = 150000, n = 96, pos = [], nrm = [], idx = [];
@@ -1663,16 +1769,14 @@ face.frustumCulled = false; scene.add(face);
 
 // overlay lines: where the crater will form, and today's coast
 function lineMat(color, alpha, dash, out = 0) {
-  return new THREE.ShaderMaterial({
+  return shaderMat({
     uniforms: { ...U, uCol: { value: new THREE.Color(color) }, uAlpha: { value: alpha }, uDash: { value: dash }, uOut: { value: out } },
-    transparent: true, depthWrite: false,
+    transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     vertexShader: VS_HEAD + COMMON + `attribute float aD; uniform float uOut; varying float vD; varying vec3 vW;
 void main() { vD = aD; vW = position; gl_Position = projectionMatrix * viewMatrix * vec4(bend(vec3(position.x, (uOut > 0.5 ? position.y + max(seaH(position.xz), 0.0) : max(position.y, elevAt(position.xz) + 25.0)) * uExag, position.z)), 1.0);
-  #include <logdepthbuf_vertex>
 }`,
     fragmentShader: FS_HEAD + COMMON + `uniform vec3 uCol; uniform float uAlpha, uDash, uOut; varying float vD; varying vec3 vW;
 void main() {
-  #include <logdepthbuf_fragment>
   if ((cutAway(vW.xz) && !outside(vW.xz)) || (uOut > 0.5 && (inBlock(vW.xz) || gulfSD(vW.xz) > 0.0)) || (uDash > 0.0 && fract(vD / uDash) > 0.55)) discard;
   gl_FragColor = vec4(uCol, uAlpha);
 }`,
@@ -1704,7 +1808,7 @@ const gulfToday = lines((GM.today || []).map(c => polyline(c, false)), lineMat('
 const DIR_IN = new THREE.Vector3(Math.cos(deg(60)) * Math.SQRT1_2, Math.sin(deg(60)), -Math.cos(deg(60)) * Math.SQRT1_2);   // back along the path: up and to the NE
 const V_IMP = 20000, R_IMP = 6000;
 const astU = { uEntry: { value: 0 }, uLead: { value: DIR_IN.clone().negate() } };
-const rockBall = new THREE.Mesh(new THREE.IcosahedronGeometry(R_IMP, 24), new THREE.ShaderMaterial({
+const rockBall = new THREE.Mesh(new THREE.IcosahedronGeometry(R_IMP, 24), shaderMat({
   uniforms: { ...U, ...astU }, extensions: { derivatives: true },
   vertexShader: VS_HEAD + `varying vec3 vW, vO;
 float lumps(vec3 d) { return 0.13 * sin(3.1 * d.x + 1.3) * sin(2.7 * d.y + 0.4) * sin(3.4 * d.z + 2.1) + 0.06 * sin(7.3 * d.x + 2.0) * sin(6.1 * d.y + 0.9) * sin(6.7 * d.z) + 0.03 * sin(15.0 * d.y + 3.0 * d.z); }
@@ -1712,43 +1816,39 @@ void main() {
   vec3 d = normalize(position); vO = d;
   vec3 q = position * (1.0 + lumps(d)) * vec3(1.0, 0.82, 0.9);       // a lumpy, somewhat flattened body
   vec4 wp = modelMatrix * vec4(q, 1.0); vW = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + `uniform vec3 uSunDir, uSunCol; uniform float uEntry, uTime; uniform vec3 uLead; varying vec3 vW, vO;
 void main() {
-  #include <logdepthbuf_fragment>
   vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
   float grit = 0.75 + 0.5 * fract(sin(dot(floor(vO * 40.0), vec3(12.9, 78.2, 37.7))) * 43758.5);
   vec3 col = vec3(0.055, 0.05, 0.046) * grit * (uSunCol * max(dot(n, uSunDir), 0.0) + 0.04);   // carbonaceous rock: as dark as charcoal
   float lead = max(dot(n, uLead), 0.0);
-  col += mix(vec3(1.0, 0.45, 0.12), vec3(1.0, 0.92, 0.8), lead) * uEntry * (0.15 + 3.0 * pow(lead, 2.0));  // ablating, white-hot where it meets the air
+  col += mix(vec3(1.0, 0.45, 0.12), vec3(1.0, 0.92, 0.8), lead) * uEntry * (0.15 + 3.0 * lead * lead);  // ablating, white-hot where it meets the air
   gl_FragColor = vec4(col, 1.0);
 }`,
 }));
 // the shock cap: air in front of it compressed to tens of thousands of degrees
-const shockCap = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), new THREE.ShaderMaterial({
+const shockCap = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), shaderMat({
   uniforms: astU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  vertexShader: VS_HEAD + 'varying vec3 vN, vV; void main() { vN = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vV = normalize(cameraPosition - wp.xyz); gl_Position = projectionMatrix * viewMatrix * wp;\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: FS_HEAD + 'uniform float uEntry; uniform vec3 uLead; varying vec3 vN, vV; void main() {\n#include <logdepthbuf_fragment>\n vec3 n = normalize(vN); float f = pow(max(dot(n, uLead), 0.0), 2.5), rim = pow(1.0 - abs(dot(n, vV)), 1.5);\n gl_FragColor = vec4(mix(vec3(1.0, 0.75, 0.45), vec3(0.85, 0.92, 1.0), f) * uEntry * (f * 2.4 + rim * 0.8 * f), 1.0); }',
+  vertexShader: VS_HEAD + 'varying vec3 vN, vV; void main() { vN = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vV = normalize(cameraPosition - wp.xyz); gl_Position = projectionMatrix * viewMatrix * wp; }',
+  fragmentShader: FS_HEAD + 'uniform float uEntry; uniform vec3 uLead; varying vec3 vN, vV; void main() { vec3 n = normalize(vN); float f = pow(max(dot(n, uLead), 0.0), 2.5), rim = pow(1.0 - abs(dot(n, vV)), 1.5); gl_FragColor = vec4(mix(vec3(1.0, 0.75, 0.45), vec3(0.85, 0.92, 1.0), f) * uEntry * (f * 2.4 + rim * 0.8 * f), 1.0); }',
 }));
 shockCap.visible = false; shockCap.frustumCulled = false; shockCap.renderOrder = 5;
 // the tunnel of shocked air behind it, from where it entered the atmosphere: white-hot behind it, cooling to red
 const trailU = { uK: { value: 0 } };
-const trail = new THREE.Mesh(new THREE.CylinderGeometry(R_IMP * 1.15, R_IMP * 0.5, 1, 32, 1, true), new THREE.ShaderMaterial({
+const trail = new THREE.Mesh(new THREE.CylinderGeometry(R_IMP * 1.15, R_IMP * 0.5, 1, 32, 1, true), shaderMat({
   uniforms: trailU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  vertexShader: VS_HEAD + 'varying float vL; varying vec3 vN, vV; void main() { vL = uv.y; vN = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vV = normalize(cameraPosition - wp.xyz); gl_Position = projectionMatrix * viewMatrix * wp;\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: FS_HEAD + 'uniform float uK; varying float vL; varying vec3 vN, vV; void main() {\n#include <logdepthbuf_fragment>\n float core = pow(abs(dot(normalize(vN), vV)), 0.7);\n vec3 c = mix(vec3(0.9, 0.18, 0.04), mix(vec3(1.0, 0.6, 0.25), vec3(1.0, 0.95, 0.85), smoothstep(0.75, 1.0, vL)), smoothstep(0.2, 0.85, vL));\n gl_FragColor = vec4(c * uK * (0.25 + 2.2 * pow(vL, 3.0)) * core, 1.0); }',
+  vertexShader: VS_HEAD + 'varying float vL; varying vec3 vN, vV; void main() { vL = uv.y; vN = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vV = normalize(cameraPosition - wp.xyz); gl_Position = projectionMatrix * viewMatrix * wp; }',
+  fragmentShader: FS_HEAD + 'uniform float uK; varying float vL; varying vec3 vN, vV; void main() { float core = pow(abs(dot(normalize(vN), vV)), 0.7); vec3 c = mix(vec3(0.9, 0.18, 0.04), mix(vec3(1.0, 0.6, 0.25), vec3(1.0, 0.95, 0.85), smoothstep(0.75, 1.0, vL)), smoothstep(0.2, 0.85, vL)); gl_FragColor = vec4(c * uK * (0.25 + 2.2 * vL * vL * vL) * core, 1.0); }',
 }));
 const fireU = { uHeat: { value: 0 }, uAlpha: { value: 0 } };
-const fireball = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), new THREE.ShaderMaterial({
+const fireball = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), shaderMat({
   uniforms: { ...U, ...fireU }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: VS_HEAD + COMMON + `varying vec3 vN, vW, vP;
 void main() { vN = normalize(mat3(modelMatrix) * normal); vP = position; vec4 wp = modelMatrix * vec4(position, 1.0); vW = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + COMMON + `uniform float uHeat, uAlpha; varying vec3 vN, vW, vP;
 void main() {
-  #include <logdepthbuf_fragment>
   if (vW.y < 0.0) discard;
   float f = abs(dot(normalize(vN), normalize(cameraPosition - vW)));
   float n = nz(vP.xz * 0.7 + vP.y * 0.35 + uTime * 0.02) * nz(vP.zy * 0.9 - uTime * 0.015 + 0.4);
@@ -1759,18 +1859,35 @@ void main() {
 for (const m of [rockBall, trail, fireball]) { m.visible = false; m.frustumCulled = false; m.renderOrder = 4; scene.add(m); }
 scene.add(shockCap);
 
+function countDesc(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] > t) lo = m + 1; else hi = m; }
+  return lo;
+}
 // ejecta: each particle leaves the ground when the excavation front reaches it and flies a ballistic arc;
 // together they form the inverted cone of the ejecta curtain. Launch speed falls off with distance, more downrange (SW).
+// Sorted by landing time descending so setDrawRange skips already-landed particles.
 const NEJ = SMALL ? 30000 : 80000;
 const ejGeom = new THREE.BufferGeometry();
+const EJ_END = new Float32Array(NEJ);
 {
+  const raw = new Float32Array(NEJ * 4), end = new Float32Array(NEJ), ord = new Uint32Array(NEJ);
+  for (let i = 0; i < NEJ; i++) {
+    const r0 = REX * (0.18 + 0.82 * Math.sqrt(Math.random())), az = Math.random() * Math.PI * 2, z2 = Math.random(), z3 = Math.random();
+    raw[i * 4] = r0; raw[i * 4 + 1] = az; raw[i * 4 + 2] = z2; raw[i * 4 + 3] = z3;
+    const t0 = 60 * Math.pow(r0 / 46000, 2.2222);
+    const v = Math.min(3200, 450 * Math.pow(r0 / 46000, -1.6)) * (1 + 0.18 * (Math.cos(az) * -0.7071 + Math.sin(az) * 0.7071)) * (0.85 + 0.3 * z2);
+    const tf = 2 * v * Math.sin(deg(45 + (z3 - 0.5) * 16)) / 9.81;
+    end[i] = t0 + tf; ord[i] = i;
+  }
+  ord.sort((a, b) => end[b] - end[a]);
   const a = new Float32Array(NEJ * 4);
-  for (let i = 0; i < NEJ; i++) { a[i * 4] = REX * (0.18 + 0.82 * Math.sqrt(Math.random())); a[i * 4 + 1] = Math.random() * Math.PI * 2; a[i * 4 + 2] = Math.random(); a[i * 4 + 3] = Math.random(); }
+  for (let i = 0; i < NEJ; i++) { const j = ord[i]; EJ_END[i] = end[j]; a.set(raw.subarray(j * 4, j * 4 + 4), i * 4); }
   ejGeom.setAttribute('aP', new THREE.BufferAttribute(a, 4));
   ejGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NEJ * 3), 3));
 }
 const ejU = { uPS: { value: 800 } };
-const ejecta = new THREE.Points(ejGeom, new THREE.ShaderMaterial({
+const ejecta = new THREE.Points(ejGeom, shaderMat({
   uniforms: { ...U, ...ejU }, transparent: true, depthWrite: false,
   vertexShader: VS_HEAD + COMMON + `attribute vec4 aP; uniform float uPS; varying float vA, vHot; varying vec3 vC;
 void main() {
@@ -1779,27 +1896,26 @@ void main() {
   float v = min(3200.0, 450.0 * pow(r0 / 46000.0, -1.6)) * (1.0 + 0.18 * dot(dir, vec2(-0.7071, 0.7071))) * (0.85 + 0.3 * aP.z);
   float ang = radians(45.0 + (aP.w - 0.5) * 16.0), vx = v * cos(ang), vy = v * sin(ang), tf = 2.0 * vy / 9.81;
   vA = 0.0; vHot = 0.0; vC = vec3(0.0);
-  if (uImpC.z < 0.5 || tau <= 0.0 || tau >= tf) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
+  if (uImpC.z < 0.5 || tau <= 0.0 || tau >= tf) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
   float rr = r0 + vx * tau, y = vy * tau - 4.905 * tau * tau;
-  if (cutAway(dir * rr)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }   // the cut removes this half of the curtain too
+  if (cutAway(dir * rr)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }   // the cut removes this half of the curtain too
+  vA = 0.7 * (1.0 - smoothstep(0.88, 1.0, tau / tf)) * (1.0 - smoothstep(150000.0, 300000.0, y));
   vec4 mv = viewMatrix * vec4(bend(vec3(dir.x * rr, y * uExag, dir.y * rr)), 1.0);
+  if (vA <= 0.002 || mv.z >= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
   gl_Position = projectionMatrix * mv;
   gl_PointSize = clamp(1300.0 * uPS / max(-mv.z, 1.0), 1.5, 22.0);
   vHot = exp(-tau / 10.0) * (1.0 - smoothstep(9000.0, 26000.0, r0));
-  vA = 0.7 * (1.0 - smoothstep(0.88, 1.0, tau / tf)) * (1.0 - smoothstep(150000.0, 300000.0, y));
   vC = mix(vec3(0.3, 0.27, 0.23), vec3(0.52, 0.47, 0.41), aP.z) * (0.75 + 0.5 * uSunDir.y);
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + `varying float vA, vHot; varying vec3 vC;
 void main() {
-  #include <logdepthbuf_fragment>
   vec2 q = gl_PointCoord * 2.0 - 1.0; float r2 = dot(q, q);
   if (r2 > 1.0 || vA <= 0.0) discard;
   gl_FragColor = vec4(mix(vC, vec3(1.0, 0.42, 0.1) * 3.0, vHot), vA * (1.0 - r2));
 }`,
 }));
 ejecta.frustumCulled = false; ejecta.renderOrder = 5; scene.add(ejecta);
-const _hd = new THREE.Vector3(), _dv = new THREE.Vector3(), _Y = new THREE.Vector3(0, 1, 0);
+const _hd = new THREE.Vector3(), _dv = new THREE.Vector3(), _dv2 = new THREE.Vector3(), _Y = new THREE.Vector3(0, 1, 0);
 const NST = SMALL ? 3000 : 8000;
 const stGeom = new THREE.BufferGeometry();
 {
@@ -1807,24 +1923,25 @@ const stGeom = new THREE.BufferGeometry();
   for (let i = 0; i < NST; i++) { a[i * 4] = 52000 * Math.sqrt(Math.random()); a[i * 4 + 1] = Math.random() * Math.PI * 2; a[i * 4 + 2] = Math.random(); a[i * 4 + 3] = Math.random(); }
   stGeom.setAttribute('aS', new THREE.BufferAttribute(a, 4)); stGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NST * 3), 3));
 }
-const steam = new THREE.Points(stGeom, new THREE.ShaderMaterial({
+const steam = new THREE.Points(stGeom, shaderMat({
   uniforms: { ...U, ...ejU }, transparent: true, depthWrite: false,
   vertexShader: VS_HEAD + COMMON + `attribute vec4 aS; uniform float uPS; varying float vA;
 void main() {
   vec2 p = vec2(cos(aS.y), sin(aS.y)) * aS.x;
   float t = uImpC.w, on = uDepB.w * smoothstep(600.0, 900.0, t) * (1.0 - smoothstep(4000.0, 10000.0, t));
   vA = 0.0;
-  if (on < 0.01 || cutAway(p) || !wetAt(p)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
+  if (on < 0.01 || cutAway(p)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  vec2 ss = seaState(p);
+  if (ss.y <= 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
   float age = fract(uTime / 16.0 + aS.z);
-  vec4 mv = viewMatrix * vec4(bend(vec3(p.x, (max(seaH(p), 0.0) + age * 9000.0) * uExag, p.y)), 1.0);
+  vec4 mv = viewMatrix * vec4(bend(vec3(p.x, (max(ss.x, 0.0) + age * 9000.0) * uExag, p.y)), 1.0);
+  vA = on * sin(3.1416 * age) * 0.32 * (0.6 + 0.4 * aS.w);
+  if (vA <= 0.002 || mv.z >= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
   gl_Position = projectionMatrix * mv;
   gl_PointSize = clamp((1500.0 + age * 5000.0) * uPS / max(-mv.z, 1.0), 2.0, 60.0);
-  vA = on * sin(3.1416 * age) * 0.32 * (0.6 + 0.4 * aS.w);
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + `varying float vA;
 void main() {
-  #include <logdepthbuf_fragment>
   vec2 q = gl_PointCoord * 2.0 - 1.0; float r2 = dot(q, q);
   if (r2 > 1.0 || vA <= 0.0) discard;
   gl_FragColor = vec4(vec3(0.92, 0.93, 0.95), vA * (1.0 - r2) * (1.0 - r2));
@@ -1836,8 +1953,10 @@ steam.frustumCulled = false; steam.renderOrder = 6; scene.add(steam);
 // through the column of air the plume blows away, and flying two-body orbits while the Earth turns under them until
 // they fall back to 100 km (where the re-entry glow takes over); the slowest, which never get that high, land near
 // the crater. Each point stands for an equal share of the mass. Faster than escape: lost to space.
+// Sorted by landing time descending so setDrawRange skips the ~85-90% that land in the first 30 minutes.
 const NPL = SMALL ? 16000 : 40000, GMe = 3.986004e14, OMEGA_E = 7.2921e-5, R_IN = RE_M + 100e3;
 const plGeom = new THREE.BufferGeometry();
+const PL_END = new Float32Array(NPL);
 let PL_TMAX = 0;
 {
   let sd = 66 >>> 0; const rnd = () => { sd = (sd + 0x6D2B79F5) >>> 0; let q = sd; q = Math.imul(q ^ (q >>> 15), q | 1); q ^= q + Math.imul(q ^ (q >>> 7), q | 61); return ((q ^ (q >>> 14)) >>> 0) / 4294967296; };
@@ -1845,7 +1964,8 @@ let PL_TMAX = 0;
   const up = [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)], east = [-Math.sin(lo), Math.cos(lo), 0];
   const north = [up[1] * east[2] - up[2] * east[1], up[2] * east[0] - up[0] * east[2], up[0] * east[1] - up[1] * east[0]];
   const k = 1.65, vmin = 2000, vmax = 11000;
-  const A = new Float32Array(NPL * 4), B = new Float32Array(NPL * 4), C = new Float32Array(NPL * 4);
+  const rA = new Float32Array(NPL * 4), rB = new Float32Array(NPL * 4), rC = new Float32Array(NPL * 4);
+  const end = new Float32Array(NPL), ord = new Uint32Array(NPL);
   let m = 0;
   const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   while (m < NPL) {
@@ -1869,9 +1989,16 @@ let PL_TMAX = 0;
       const E1 = 2 * Math.PI - Math.acos(clamp((1 - R_IN / a) / e, -1, 1));
       tf = (E1 - e * Math.sin(E1) - M0) / n;
     }
-    PL_TMAX = Math.max(PL_TMAX, tl + tf);
-    A.set([a / RE_M, e, n, M0], m * 4); B.set([P[0], P[1], P[2], tl], m * 4); C.set([Q[0], Q[1], Q[2], tf], m * 4);
+    const tEnd = tl + tf; PL_TMAX = Math.max(PL_TMAX, tEnd);
+    rA.set([a / RE_M, e, n, M0], m * 4); rB.set([P[0], P[1], P[2], tl], m * 4); rC.set([Q[0], Q[1], Q[2], tf], m * 4);
+    end[m] = tEnd; ord[m] = m;
     m++;
+  }
+  ord.sort((a, b) => end[b] - end[a]);
+  const A = new Float32Array(NPL * 4), B = new Float32Array(NPL * 4), C = new Float32Array(NPL * 4);
+  for (let i = 0; i < NPL; i++) {
+    const j = ord[i]; PL_END[i] = end[j];
+    A.set(rA.subarray(j * 4, j * 4 + 4), i * 4); B.set(rB.subarray(j * 4, j * 4 + 4), i * 4); C.set(rC.subarray(j * 4, j * 4 + 4), i * 4);
   }
   plGeom.setAttribute('aK', new THREE.BufferAttribute(A, 4)); plGeom.setAttribute('aP', new THREE.BufferAttribute(B, 4)); plGeom.setAttribute('aQ', new THREE.BufferAttribute(C, 4));
   plGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NPL * 3), 3));
@@ -1879,35 +2006,38 @@ let PL_TMAX = 0;
 // the paleo Earth-fixed frame (x: lon 0, y: lon 90 E, z: north; Earth radii) -> world
 const PL_M = EARTH_M.clone().multiply(new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1));
 const plU = { uPlM: { value: PL_M }, uPlS: { value: 1000 } };
-const plume = new THREE.Points(plGeom, new THREE.ShaderMaterial({
+const plume = new THREE.Points(plGeom, shaderMat({
   uniforms: { ...U, ...plU }, transparent: true, depthWrite: false,
   vertexShader: VS_HEAD + `attribute vec4 aK, aP, aQ; uniform mat4 uPlM; uniform float uPlS; uniform vec4 uImpC; varying float vA, vHot, vEnd;
 void main() {
   float tau = uImpC.w - aP.w, tf = aQ.w;
   vA = 0.0;
-  if (uImpC.z < 0.5 || tau <= 0.0 || tau >= tf) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
-  float a = aK.x, e = aK.y, M = aK.w + aK.z * tau, E = 3.14159265;
-  for (int i = 0; i < 12; i++) E -= (E - e * sin(E) - M) / (1.0 - e * cos(E));
+  if (uImpC.z < 0.5 || tau <= 0.0 || tau >= tf) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  float a = aK.x, e = aK.y, M = aK.w + aK.z * tau;
+  float E = M + 0.85 * e * sign(sin(M));                            // Danby initial guess + 4 cubically-convergent Halley steps
+  for (int i = 0; i < 4; i++) {
+    float sE = sin(E), cE = cos(E), f = E - e * sE - M, fp = 1.0 - e * cE;
+    E -= f / (fp - 0.5 * f * e * sE / fp);
+  }
   vec3 p = a * ((cos(E) - e) * aP.xyz + sqrt(1.0 - e * e) * sin(E) * aQ.xyz);
   float w = -${OMEGA_E} * uImpC.w, c = cos(w), s = sin(w);          // into the turning Earth's frame
   p = vec3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
   vec4 mv = viewMatrix * (uPlM * vec4(p, 1.0));
-  gl_Position = projectionMatrix * mv;
   vHot = exp(-tau / 45.0);                                         // condensing vapour and melt, glowing for the first minute
   vEnd = smoothstep(tf - 90.0, tf, tau);                           // heating again as it falls back into the air
   // each point is a parcel of debris, some 25 km across at launch, spreading at ~400 m/s as it flies (the speeds within
   // it differ): the cloud thins into a veil rather than a spray of dots
-  float sz = 25000.0 * (1.0 + 2.0 * vHot) + 400.0 * tau, px = sz * uPlS / max(-mv.z, 1.0);
-  gl_PointSize = clamp(px, 1.5, ${SMALL ? '28.0' : '48.0'});
+  float sz = 25000.0 * (1.0 + 2.0 * vHot) + 400.0 * tau;
   // the distal spherules are an optical depth of ~10 when spread over the globe (3 mm of 0.25 mm beads; Goldin and Melosh
   // 2009): the thinned cloud stays a visible veil
   vA = 0.55 * smoothstep(0.0, 4.0, tau) * clamp(pow(25000.0 / sz, 0.8), 0.1, 1.0);
   vA *= smoothstep(1.5 * sz, 6.0 * sz, -mv.z);      // up close a parcel is finer than this: the crater's own curtain and fireball show it
-  #include <logdepthbuf_vertex>
+  if (vA <= 0.002 || mv.z >= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = clamp(sz * uPlS / max(-mv.z, 1.0), 1.5, ${SMALL ? '28.0' : '48.0'});
 }`,
   fragmentShader: FS_HEAD + `varying float vA, vHot, vEnd;
 void main() {
-  #include <logdepthbuf_fragment>
   vec2 q = gl_PointCoord * 2.0 - 1.0; float r2 = dot(q, q);
   if (r2 > 1.0 || vA <= 0.0) discard;
   vec3 dust = vec3(0.46, 0.41, 0.35);                              // sunlit glass spherules and rock dust
@@ -1918,39 +2048,44 @@ void main() {
 plume.frustumCulled = false; plume.renderOrder = 6; plume.visible = false; scene.add(plume);
 // Far out the asteroid is too small to see as a body: a sharp point of reflected sunlight at its true position
 // (about magnitude +1 three hours out, brightening as it closes in); it gives way to the body once that spans a few pixels
-const star = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)), new THREE.ShaderMaterial({
+const star = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)), shaderMat({
   uniforms: { uSize: { value: 3 }, uB: { value: 1 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  vertexShader: VS_HEAD + 'uniform float uSize; void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = uSize;\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: FS_HEAD + 'uniform float uB; void main() {\n#include <logdepthbuf_fragment>\n vec2 q = gl_PointCoord * 2.0 - 1.0; float r = dot(q, q); if (r > 1.0) discard; gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * uB * pow(1.0 - r, 3.0), 1.0); }',
+  vertexShader: VS_HEAD + 'uniform float uSize; void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = uSize; }',
+  fragmentShader: FS_HEAD + 'uniform float uB; void main() { vec2 q = gl_PointCoord * 2.0 - 1.0; float r = dot(q, q); if (r > 1.0) discard; float f = 1.0 - r; gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * uB * f * f * f, 1.0); }',
 }));
 star.frustumCulled = false; star.renderOrder = 7; scene.add(star);
-function updateFx() {
+let vrEjCap = NEJ, vrPlCap = NPL;
+function updateFx(farWorld) {
   const t = S.imp.t, sf0 = seafloor(0, 0);
   const dist = V_IMP * Math.max(0, -t);
   // where it is, and how many pixels its 12 km would span from here
   const inFlight = t < 0.15, S_TOP = 100e3 / Math.sin(deg(60));
   _hd.set(DIR_IN.x * dist, sf0 * exag + DIR_IN.y * dist, DIR_IN.z * dist);          // true 60° path, not stretched by the relief exaggeration
-  const px = 2 * R_IMP / Math.max(camera.position.distanceTo(_hd), 1) * pxPerTan();
+  const camToAst = Math.max(camera.position.distanceTo(_hd), 1);
+  const px = 2 * R_IMP / camToAst * pxPerTan();
   star.visible = t < -0.5 && px < 5;
   if (star.visible) {
-    star.position.copy(_hd);
-    star.material.uniforms.uSize.value = pr * 3;
+    // Clamp the point-of-light along the true sight line inside the tight depth frustum (parallax is zero at >10,000 km)
+    const maxD = farWorld * 0.85;
+    if (camToAst > maxD) star.position.copy(camera.position).addScaledVector(_dv2.copy(_hd).sub(camera.position).normalize(), maxD);
+    else star.position.copy(_hd);
+    star.material.uniforms.uSize.value = (xrOn ? clamp(xrPxT / 900, 1, 2.5) : pr) * 3;
     star.material.uniforms.uB.value = (1 - smooth(2, 5, px)) * clamp(0.6 + 0.25 * Math.log10(2.16e8 / Math.max(dist, 1)), 0.6, 1.4);   // brighter as it nears
   }
   // it enters the atmosphere (100 km up) about 5.8 s before contact
-  rockBall.visible = inFlight;
+  rockBall.visible = inFlight && (px >= 1.2 || t > -6);
   const s = V_IMP * Math.max(0, -t), alt = s * Math.sin(deg(60));
   const dens = inFlight && s < S_TOP ? Math.exp(-alt / 8000) : 0;                // air density (scale height 8 km): drives the light it throws
   const glow = inFlight && s < S_TOP ? Math.min(1, dens + 0.35 * (1 - alt / 100e3) ** 2) : 0;   // its own glow shows from 100 km down, like a meteor's
   trail.visible = shockCap.visible = glow > 1e-5;
   astU.uEntry.value = Math.min(1, glow * 1.6 + (s < S_TOP ? 0.02 : 0));
-  if (inFlight) {
+  if (inFlight && (rockBall.visible || trail.visible)) {
     rockBall.position.copy(_hd); rockBall.rotation.set(0.3, -t * 0.02, 0.2);
     shockCap.position.copy(_hd).addScaledVector(DIR_IN, -R_IMP * 0.25); shockCap.scale.setScalar(R_IMP * (1.25 + 0.35 * Math.min(1, glow * 4)));
     _dv.copy(DIR_IN);
     const L = Math.max(1, Math.min(S_TOP - s, S_TOP));
     trail.scale.set(1 + 0.6 * Math.min(1, glow * 3), L, 1 + 0.6 * Math.min(1, glow * 3)); trail.position.copy(_hd).addScaledVector(_dv, L / 2);
-    trail.quaternion.setFromUnitVectors(_Y, _dv.clone().negate());
+    trail.quaternion.setFromUnitVectors(_Y, _dv2.copy(_dv).negate());
     trailU.uK.value = Math.min(1.4, 0.05 + glow * 2.5);
   }
   U.uAst.value.set(_hd.x, _hd.y, _hd.z, dens);
@@ -1963,10 +2098,13 @@ function updateFx() {
     fireU.uAlpha.value = (t < 0.5 ? 2.2 : 0.75) * Math.exp(-t / 28) * smooth(0, 0.08, t);
   }
   ejecta.visible = t > 0 && t < 650;
+  if (ejecta.visible) ejGeom.setDrawRange(0, Math.min(countDesc(EJ_END, t), xrOn ? vrEjCap : NEJ));
   plume.visible = t > 0 && t < Math.min(PL_TMAX, 12 * 3600);      // the re-entry run's span too
-  if (plume.visible) plU.uPlS.value = renderer.domElement.height / (2 * Math.tan(deg(camera.fov / 2)));
+  if (plume.visible) {
+    plGeom.setDrawRange(0, Math.min(countDesc(PL_END, t), xrOn ? vrPlCap : NPL));
+    if (!xrOn) plU.uPlS.value = renderer.domElement.height / (2 * Math.tan(deg(camera.fov / 2)));
+  }
   steam.visible = t > 600 && t < 10000;
-  gulfMesh.visible = gulfCoast.visible = gulfOn(); gulfToday.visible = gulfOn() && showCoast;
 }
 
 // ---------- cut ----------
@@ -2656,110 +2794,257 @@ function updateLabels() {
 let globeReady = null;
 // streamed after the first view: the global tsunami and re-entry frames (ensureFrames), the regional tsunami (loadSWE)
 let framesReady = null, sweReq = null, coastReq = null, topoReq = null;
+const nextFrame = () => new Promise(r => requestAnimationFrame(r));
+async function loadColorTex(url, wrapS = true) {
+  const blob = await (await fetch(webp(url))).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
+  const t = new THREE.Texture(bmp);
+  t.colorSpace = THREE.SRGBColorSpace; t.flipY = false;
+  t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+  if (wrapS) t.wrapS = THREE.RepeatWrapping;
+  t.needsUpdate = true;
+  return t;
+}
+// Inline Web Worker for off-main-thread WebP decoding and byte/half-float unpacking (falls back to main thread if unavailable)
+const decodeWorker = (() => {
+  if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') return null;
+  const src = `
+    const _f32 = new Float32Array(1), _u32 = new Uint32Array(_f32.buffer);
+    function toHalf(val) {
+      _f32[0] = val; const x = _u32[0];
+      let bits = (x >> 16) & 0x8000, m = (x >> 12) & 0x07ff, e = (x >> 23) & 0xff;
+      if (e < 103) return bits;
+      if (e > 142) { bits |= 0x7c00; bits |= ((e == 255) ? 0 : 1) && (x & 0x007fffff); return bits; }
+      if (e < 113) { m |= 0x0800; bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1); return bits; }
+      bits |= ((e - 112) << 10) | (m >> 1); bits += m & 1; return bits;
+    }
+    async function loadPx(url) {
+      const blob = await (await fetch(url)).blob();
+      const bmp = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+      const cv = new OffscreenCanvas(bmp.width, bmp.height);
+      const g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0);
+      const px = g.getImageData(0, 0, bmp.width, bmp.height).data; bmp.close();
+      return { px, w: cv.width, h: cv.height };
+    }
+    function unpackRgb(imgs, tw, th, pr, n) {
+      const out = new Uint8Array(tw * th * n); let f = 0;
+      for (const im of imgs) for (let c = 0; c < pr * pr && f < n; c++) {
+        const r0 = Math.floor(c / pr) * th, c0 = (c % pr) * tw;
+        for (let ch = 0; ch < 3 && f < n; ch++, f++) {
+          const base = f * tw * th;
+          for (let y = 0; y < th; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = base + y * tw; for (let x = 0; x < tw; x++, src += 4) out[row + x] = im.px[src]; }
+        }
+      }
+      return out;
+    }
+    self.onmessage = async ({ data: msg }) => {
+      const { id, op } = msg;
+      try {
+        if (op === 'topo') {
+          const im = await loadPx(msg.url), n = msg.nx * msg.ny, a = new Uint16Array(n);
+          for (let i = 0; i < n; i++) a[i] = toHalf((im.px[i * 4] * 256 + im.px[i * 4 + 1]) * msg.step + msg.off);
+          self.postMessage({ id, data: a.buffer }, [a.buffer]);
+        } else if (op === 'coast') {
+          const im = await loadPx(msg.url), n = msg.w * msg.h, a = new Uint8Array(n);
+          for (let i = 0; i < n; i++) a[i] = im.px[i * 4];
+          self.postMessage({ id, data: a.buffer }, [a.buffer]);
+        } else if (op === 'swe') {
+          const imgs = await Promise.all(msg.urls.map(loadPx));
+          const out = unpackRgb(imgs, msg.size, msg.size, msg.per_row, msg.n);
+          self.postMessage({ id, data: out.buffer }, [out.buffer]);
+        } else if (op === 'frames') {
+          const [wm, rm, ...rest] = await Promise.all([msg.windUrl ? loadPx(msg.windUrl) : null, loadPx(msg.rmUrl), ...msg.rfUrls.map(loadPx), ...msg.frUrls.map(loadPx)]);
+          const rfImgs = rest.slice(0, msg.rfUrls.length), frImgs = rest.slice(msg.rfUrls.length);
+          const rfCpu = unpackRgb(rfImgs, 360, 180, msg.rfPerRow, msg.rfN);
+          const rfGpu = new Uint8Array(rfCpu.length);
+          for (let i = 0; i < rfCpu.length; i++) { const c = rfCpu[i]; rfGpu[i] = c <= 1 ? 0 : Math.round((c - 1) * 255 / 254); }
+          const rmOut = new Uint8Array(64800); for (let i = 0; i < 64800; i++) rmOut[i] = rm.px[i * 4];
+          const fireOut = new Uint8Array(64800 * 4), firstIgnition = [1e12, 1e12];
+          const firstHot = msg.fireT.map(share => { let code = 1; while (code <= 255 && Math.pow(10, (code - 1) / 254 * 7) * share < msg.fireThr) code++; return code; });
+          for (let i = 0; i < 64800; i++) for (let m = 0; m < 2; m++) {
+            let cnt = 0, lit = 0, live = 0;
+            for (let k = 0; k < msg.rfN && !live; k++) {
+              if (rfCpu[k * 64800 + i] >= firstHot[m]) { cnt++; const tc = Math.round((k + 1) * msg.rfDt / 120) + 1; if (cnt >= msg.fireLitter && !lit) lit = tc; if (cnt >= msg.fireLive) live = tc; }
+            }
+            if (lit) firstIgnition[m] = Math.min(firstIgnition[m], (Math.min(lit, 255) - 1) * 120);
+            fireOut[i * 4 + m * 2] = Math.min(lit, 255); fireOut[i * 4 + m * 2 + 1] = Math.min(live, 255);
+          }
+          let windOut = null;
+          if (wm) {
+            const n = msg.windNx * msg.windNy; windOut = new Uint8Array(n * 4);
+            for (let i = 0; i < n; i++) { windOut[i * 4] = wm.px[i * 4]; windOut[i * 4 + 1] = wm.px[i * 4 + 1]; windOut[i * 4 + 2] = wm.px[(i + n) * 4]; windOut[i * 4 + 3] = wm.px[(i + n) * 4 + 1]; }
+          }
+          const waveFrames = unpackRgb(frImgs, msg.gtw, msg.gth, msg.frPerRow, msg.frN);
+          const xfer = [rfCpu.buffer, rfGpu.buffer, rmOut.buffer, fireOut.buffer, waveFrames.buffer];
+          if (windOut) xfer.push(windOut.buffer);
+          self.postMessage({ id, rfCpu: rfCpu.buffer, rfGpu: rfGpu.buffer, rm: rmOut.buffer, fire: fireOut.buffer, firstIgnition, wind: windOut ? windOut.buffer : null, waveFrames: waveFrames.buffer }, xfer);
+        } else if (op === 'climate') {
+          const im = await loadPx(msg.url), nx = msg.nx, ny = msg.ny, pr = msg.per_row, n = msg.n, data = new Uint8Array(nx * ny * 4 * n);
+          for (let k = 0; k < n; k++) {
+            const r0 = Math.floor(k / pr) * ny, c0 = (k % pr) * nx;
+            for (let y = 0; y < ny; y++) { const src = ((r0 + y) * im.w + c0) * 4, dst = (k * ny + y) * nx * 4; data.set(im.px.subarray(src, src + nx * 4), dst); }
+          }
+          self.postMessage({ id, data: data.buffer }, [data.buffer]);
+        }
+      } catch (err) { self.postMessage({ id, err: err.message || String(err) }); }
+    };`;
+  try {
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+    const pending = new Map(); let nextId = 1;
+    w.onmessage = ({ data }) => { const p = pending.get(data.id); if (!p) return; pending.delete(data.id); data.err ? p.rej(new Error(data.err)) : p.res(data); };
+    return msg => new Promise((res, rej) => { const id = nextId++; pending.set(id, { res, rej }); w.postMessage({ ...msg, id }); });
+  } catch (_) { return null; }
+})();
+const absWebp = url => new URL(webp(url), location.href).href;
+
 function loadTopo() {          // the 0.1 deg topography for the globe (pipeline/globe.py): heights, (R*256+G)*step+off
   if (topoReq) return topoReq;
   const T = GLB.topo; if (!T) return (topoReq = Promise.resolve());
-  topoReq = loadPxQuiet('data/' + T.file).then(im => {
-    const n = T.nx * T.ny, a = new Uint16Array(n), H = THREE.DataUtils.toHalfFloat;
-    for (let i = 0; i < n; i++) a[i] = H((im.px[i * 4] * 256 + im.px[i * 4 + 1]) * GLB.h.step + GLB.h.off);
+  topoReq = (async () => {
+    let a;
+    if (decodeWorker) {
+      const r = await decodeWorker({ op: 'topo', url: absWebp('data/' + T.file), nx: T.nx, ny: T.ny, step: GLB.h.step, off: GLB.h.off });
+      a = new Uint16Array(r.data);
+    } else {
+      const im = await loadPxQuiet('data/' + T.file), n = T.nx * T.ny, H = THREE.DataUtils.toHalfFloat;
+      a = new Uint16Array(n);
+      for (let i = 0; i < n; i++) a[i] = H((im.px[i * 4] * 256 + im.px[i * 4 + 1]) * GLB.h.step + GLB.h.off);
+    }
     const t = new THREE.DataTexture(a, T.nx, T.ny, THREE.RedFormat, THREE.HalfFloatType);
-    t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = canRenderHalfFloat ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+    t.generateMipmaps = canRenderHalfFloat;
+    t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
     U.tGT.value = t; U.uTopo.value = 1;
-  }).then(() => GLB.cover && loadPxQuiet('data/' + GLB.cover.file)).then(im => {
-    if (!im) return;
-    const t = new THREE.DataTexture(new Uint8Array(im.px.buffer.slice(0)), GLB.cover.nx, GLB.cover.ny, THREE.RGBAFormat, THREE.UnsignedByteType);
-    t.colorSpace = THREE.SRGBColorSpace; t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
-    U.tLC.value = t; U.uLC.value = 1;
-  });
+    await nextFrame();
+    if (GLB.cover) {
+      U.tLC.value = await loadColorTex('data/' + GLB.cover.file, true);
+      U.uLC.value = 1;
+    }
+  })();
   return topoReq;
 }
 function loadCoast() {         // fine coastlines (pipeline/coast.py): one byte per cell, the ground near sea level
   if (coastReq) return coastReq;
   const C = META.coast_fine; if (!C) return (coastReq = Promise.resolve());
-  const mk = (im, w, h, wrap) => { const a = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) a[i] = im.px[i * 4];
-    const t = new THREE.DataTexture(a, w, h, THREE.RedFormat, THREE.UnsignedByteType); t.magFilter = t.minFilter = THREE.LinearFilter; if (wrap) t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true; return t; };
-  coastReq = Promise.all([loadPxQuiet('data/' + C.gulf.file), loadPxQuiet('data/' + C.globe.file)]).then(([g, w]) => {
-    U.tCG.value = mk(g, C.gulf.n, C.gulf.n, false); U.tCW.value = mk(w, C.globe.nx, C.globe.ny, true); U.uCoast.value.set(1, 1);
-  });
+  const mkTex = (a, w, h, wrap) => {
+    const t = new THREE.DataTexture(a, w, h, THREE.RedFormat, THREE.UnsignedByteType);
+    t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+    if (wrap) t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true; return t;
+  };
+  coastReq = (async () => {
+    let ga, wa;
+    if (decodeWorker) {
+      const [g, w] = await Promise.all([
+        decodeWorker({ op: 'coast', url: absWebp('data/' + C.gulf.file), w: C.gulf.n, h: C.gulf.n }),
+        decodeWorker({ op: 'coast', url: absWebp('data/' + C.globe.file), w: C.globe.nx, h: C.globe.ny }),
+      ]);
+      ga = new Uint8Array(g.data); wa = new Uint8Array(w.data);
+    } else {
+      const [g, w] = await Promise.all([loadPxQuiet('data/' + C.gulf.file), loadPxQuiet('data/' + C.globe.file)]);
+      ga = new Uint8Array(C.gulf.n * C.gulf.n); for (let i = 0; i < ga.length; i++) ga[i] = g.px[i * 4];
+      wa = new Uint8Array(C.globe.nx * C.globe.ny); for (let i = 0; i < wa.length; i++) wa[i] = w.px[i * 4];
+    }
+    U.tCG.value = mkTex(ga, C.gulf.n, C.gulf.n, false); U.uCoast.value.x = 1;
+    await nextFrame();
+    U.tCW.value = mkTex(wa, C.globe.nx, C.globe.ny, true); U.uCoast.value.y = 1;
+  })();
   return coastReq;
 }
 function ensureFrames() {
   if (framesReady) return framesReady;
   framesReady = (async () => {
-    const RX = META.reentry;
-    const [wm, rm, ...rest] = await Promise.all([META.wind ? loadPxQuiet('data/' + META.wind.file) : null, loadPxQuiet('data/reentry_m.png'), ...RX.files.map(f => loadPxQuiet('data/' + f)), ...GLB.frames.files.map(f => loadPxQuiet('data/' + f))]);
-    const rf = rest.slice(0, RX.files.length), fr = rest.slice(RX.files.length);
-    {   // re-entry heating frames (360x180, 3 per pixel) and the deposit map
-      const n = RX.n, data = new Uint8Array(360 * 180 * n); let f = 0;
-      for (const im of rf) for (let c = 0; c < RX.per_row * RX.per_row && f < n; c++) {
+    const RX = META.reentry, W = META.wind;
+    let rfCpu, rfGpu, rmOut, fireOut, firstIgnition, windOut, waveFrames;
+    if (decodeWorker) {
+      const r = await decodeWorker({
+        op: 'frames',
+        windUrl: W ? absWebp('data/' + W.file) : null, windNx: W ? W.nx : 0, windNy: W ? W.ny : 0,
+        rmUrl: absWebp('data/reentry_m.png'),
+        rfUrls: RX.files.map(f => absWebp('data/' + f)), rfPerRow: RX.per_row, rfN: RX.n, rfDt: RX.dt,
+        frUrls: GLB.frames.files.map(f => absWebp('data/' + f)), frPerRow: GLB.frames.per_row, frN: GLB.frames.n, gtw: GTW, gth: GTH,
+        fireThr: FIRE.thr, fireLitter: FIRE.litter, fireLive: FIRE.live, fireT: FIRE.T,
+      });
+      rfCpu = new Uint8Array(r.rfCpu); rfGpu = new Uint8Array(r.rfGpu); rmOut = new Uint8Array(r.rm);
+      fireOut = new Uint8Array(r.fire); firstIgnition = r.firstIgnition;
+      windOut = r.wind ? new Uint8Array(r.wind) : null; waveFrames = new Uint8Array(r.waveFrames);
+    } else {
+      const [wm, rm, ...rest] = await Promise.all([W ? loadPxQuiet('data/' + W.file) : null, loadPxQuiet('data/reentry_m.png'), ...RX.files.map(f => loadPxQuiet('data/' + f)), ...GLB.frames.files.map(f => loadPxQuiet('data/' + f))]);
+      const rf = rest.slice(0, RX.files.length), fr = rest.slice(RX.files.length);
+      rfCpu = new Uint8Array(360 * 180 * RX.n); let f = 0;
+      for (const im of rf) for (let c = 0; c < RX.per_row * RX.per_row && f < RX.n; c++) {
         const r0 = Math.floor(c / RX.per_row) * 180, c0 = (c % RX.per_row) * 360;
-        for (let ch = 0; ch < 3 && f < n; ch++, f++) for (let y = 0; y < 180; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = f * 64800 + y * 360; for (let x = 0; x < 360; x++, src += 4) data[row + x] = im.px[src]; }
+        for (let ch = 0; ch < 3 && f < RX.n; ch++, f++) for (let y = 0; y < 180; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = f * 64800 + y * 360; for (let x = 0; x < 360; x++, src += 4) rfCpu[row + x] = im.px[src]; }
       }
-      const t = new THREE.DataArrayTexture(data, 360, 180, n); t.format = THREE.RedFormat; t.type = THREE.UnsignedByteType; t.magFilter = t.minFilter = THREE.NearestFilter; t.unpackAlignment = 1; t.needsUpdate = true;
-      GU.tRF.value = t; GU.uRF.value.set(RX.dt, n, 0, 1);
-      CPU.rf = data; CPU.rm = new Uint8Array(64800); for (let i = 0; i < 64800; i++) CPU.rm[i] = rm.px[i * 4];
-      fireCodes();
+      rfGpu = new Uint8Array(rfCpu.length);
+      for (let i = 0; i < rfCpu.length; i++) { const c = rfCpu[i]; rfGpu[i] = c <= 1 ? 0 : Math.round((c - 1) * 255 / 254); }
+      rmOut = new Uint8Array(64800); for (let i = 0; i < 64800; i++) rmOut[i] = rm.px[i * 4];
+      if (wm) {
+        const n = W.nx * W.ny; windOut = new Uint8Array(n * 4);
+        for (let i = 0; i < n; i++) { windOut[i * 4] = wm.px[i * 4]; windOut[i * 4 + 1] = wm.px[i * 4 + 1]; windOut[i * 4 + 2] = wm.px[(i + n) * 4]; windOut[i * 4 + 3] = wm.px[(i + n) * 4 + 1]; }
+      }
+      const fn = GLB.frames.n, pr = GLB.frames.per_row; waveFrames = new Uint8Array(GTW * GTH * fn); f = 0;
+      for (const im of fr) for (let c = 0; c < pr * pr && f < fn; c++) {
+        const r0 = Math.floor(c / pr) * GTH, c0 = (c % pr) * GTW;
+        for (let ch = 0; ch < 3 && f < fn; ch++, f++) {
+          const base = f * GTW * GTH;
+          for (let y = 0; y < GTH; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = base + y * GTW; for (let x = 0; x < GTW; x++, src += 4) waveFrames[row + x] = im.px[src]; }
+        }
+      }
     }
-    if (wm) {   // the prevailing winds (pipeline/wind.py): surface rows above, the smoke layer's below; one RGBA texel each
-      const W = META.wind, n = W.nx * W.ny, a = new Uint8Array(n * 4);
-      for (let i = 0; i < n; i++) { a[i * 4] = wm.px[i * 4]; a[i * 4 + 1] = wm.px[i * 4 + 1]; a[i * 4 + 2] = wm.px[(i + n) * 4]; a[i * 4 + 3] = wm.px[(i + n) * 4 + 1]; }
-      const t = new THREE.DataTexture(a, W.nx, W.ny); t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
+    const tRF = new THREE.DataArrayTexture(rfGpu, 360, 180, RX.n);
+    tRF.format = THREE.RedFormat; tRF.type = THREE.UnsignedByteType; tRF.magFilter = tRF.minFilter = THREE.LinearFilter; tRF.wrapS = THREE.RepeatWrapping; tRF.unpackAlignment = 1; tRF.needsUpdate = true;
+    GU.tRF.value = tRF; GU.uRF.value.set(RX.dt, RX.n, 0, 1);
+    CPU.rf = rfCpu; CPU.rm = rmOut; CPU.waveFrames = waveFrames; globeWaveCache.reset();
+    await nextFrame();
+    if (fireOut) {
+      U.uFire.value.y = firstIgnition[0]; U.uFire.value.z = firstIgnition[1]; CPU.fire = fireOut;
+      const tx = new THREE.DataTexture(fireOut, 360, 180, THREE.RGBAFormat, THREE.UnsignedByteType); tx.magFilter = tx.minFilter = THREE.NearestFilter; tx.wrapS = THREE.RepeatWrapping; tx.needsUpdate = true;
+      U.tFire.value = tx;
+    } else fireCodes();
+    if (windOut) {
+      const t = new THREE.DataTexture(windOut, W.nx, W.ny); t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
       U.tWind.value = t; U.uWindS.value.set(W.scale[0], W.scale[1]);
-    }
-    {   // the global tsunami
-    const n = GLB.frames.n, pr = GLB.frames.per_row, data = new Uint8Array(GTW * GTH * n); let f = 0;
-    for (const im of fr) for (let c = 0; c < pr * pr && f < n; c++) {
-      const r0 = Math.floor(c / pr) * GTH, c0 = (c % pr) * GTW;
-      for (let ch = 0; ch < 3 && f < n; ch++, f++) {
-        const base = f * GTW * GTH;
-        for (let y = 0; y < GTH; y++) { let src = ((r0 + y) * im.w + c0) * 4 + ch; const row = base + y * GTW; for (let x = 0; x < GTW; x++, src += 4) data[row + x] = im.px[src]; }
-      }
-    }
-    CPU.waveFrames = data;
     }
   })();
   return framesReady;
 }
-// Decode only when playback or a seek enters a new 20-minute interval.
-let wavePair = -1;
-const waveHeight = Uint16Array.from({length: 256}, (_, code) => {
-  const a = (code - 128) / 127;
-  return code ? THREE.DataUtils.toHalfFloat(a * Math.abs(a) * GLB.w.eta_max) : 0;
-});
-function updateWaveTexture(t) {
-  const {t0, dt, n} = GLB.frames;
-  if (!CPU.waveFrames || t < t0 || t > t0 + (n + 260) * dt) {
-    GU.uWaveMix.value.y = 0;
-    return;
-  }
-  const frame = Math.min((t - t0) / dt, n - 1), first = Math.floor(frame);
-  GU.uWaveMix.value.set(frame - first, Math.exp(-Math.max(0, t - t0 - (n - 1) * dt) / 43200));
-  if (first === wavePair) return;
-  const count = GTW * GTH;
-  let tex = GU.tGF.value;
-  if (!tex) {
-    tex = new THREE.DataTexture(new Uint16Array(count * 4), GTW, GTH * 2, THREE.RGFormat, THREE.HalfFloatType);
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.magFilter = tex.minFilter = THREE.LinearFilter;
-    GU.tGF.value = tex;
-  }
-  for (let slot = 0; slot < 2; slot++) {
-    const offset = Math.min(first + slot, n - 1) * count;
-    for (let i = 0, dst = slot * count * 2; i < count; i++, dst += 2) {
-      const code = CPU.waveFrames[offset + i];
-      tex.image.data[dst] = waveHeight[code];
-      tex.image.data[dst + 1] = code ? 0x3c00 : 0; // float16 1 or 0
+function updateWaveTextures(t) {
+  {
+    const { t0, dt, n } = GLB.frames;
+    if (!CPU.waveFrames || t < t0 || t > t0 + (n + 260) * dt) GU.uWaveMix.value.w = 0;
+    else {
+      const frame = Math.min((t - t0) / dt, n - 1), first = Math.floor(frame);
+      const amp = Math.exp(-Math.max(0, t - t0 - (n - 1) * dt) / 43200);
+      globeWaveCache.update(CPU.waveFrames, n, first, frame - first, amp, GU.uWaveMix.value);
     }
   }
-  tex.needsUpdate = true;
-  wavePair = first;
+  if (swOn && t >= SW.t0) {
+    const settleAmp = Math.exp(-Math.max(t - SW.t0 - (SW.far.n - 1) * SW.far.dt, 0) / 43200);
+    const frF = clamp((t - SW.t0) / SW.far.dt, 0, SW.far.n - 1), lF = Math.floor(frF);
+    sweFarCache.update(SWF, SW.far.n, lF, frF - lF, settleAmp, U.uSwFarMix.value);
+    const frN = clamp((t - SW.t0) / SW.near.dt, 0, SW.near.n - 1), lN = Math.floor(frN);
+    sweNearCache.update(SWN, SW.near.n, lN, frN - lN, settleAmp, U.uSwNearMix.value);
+  } else {
+    U.uSwFarMix.value.w = U.uSwNearMix.value.w = 0;
+  }
 }
 function loadSWE() {
   if (sweReq) return sweReq;
-  sweReq = Promise.all([Promise.all(SW.far.files.map(f => loadPxQuiet('data/' + f))), Promise.all(SW.near.files.map(f => loadPxQuiet('data/' + f)))]).then(([fa, na]) => {
-    SWF.set(unpackFrames('far', fa)); SWN.set(unpackFrames('near', na)); tFar.needsUpdate = tNear.needsUpdate = true;
+  sweReq = (async () => {
+    if (decodeWorker) {
+      const [fa, na] = await Promise.all([
+        decodeWorker({ op: 'swe', urls: SW.far.files.map(f => absWebp('data/' + f)), size: SW.far.size, per_row: SW.far.per_row, n: SW.far.n }),
+        decodeWorker({ op: 'swe', urls: SW.near.files.map(f => absWebp('data/' + f)), size: SW.near.size, per_row: SW.near.per_row, n: SW.near.n }),
+      ]);
+      SWF.set(new Uint8Array(fa.data)); SWN.set(new Uint8Array(na.data));
+    } else {
+      const [fa, na] = await Promise.all([Promise.all(SW.far.files.map(f => loadPxQuiet('data/' + f))), Promise.all(SW.near.files.map(f => loadPxQuiet('data/' + f)))]);
+      SWF.set(unpackFrames('far', fa)); SWN.set(unpackFrames('near', na));
+    }
+    sweFarCache.reset(); sweNearCache.reset();
     swOn = true; U.uSw.value.x = SW.t0; appliedP = -1;
-  });
+  })();
   return sweReq;
 }
 // fetch in the order they are likely to be needed, once the first view is up; and at once if time runs ahead of them
@@ -2768,11 +3053,10 @@ let streamNote = 0;
 function streamNeeded(t) {
   for (const [t0, fn, ready, what] of NEEDS) if (t >= t0 && !ready()) {
     fn();
-    { if (performance.now() - streamNote > 4000) { streamNote = performance.now(); const h = $('modeHint'); h.textContent = tr('Loading {what}…', { what: tr(what) }); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 2500); } }
+    if (!xrOn && performance.now() - streamNote > 4000) { streamNote = performance.now(); const h = $('modeHint'); h.textContent = tr('Loading {what}…', { what: tr(what) }); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 2500); }
   }
 }
 
-const GLOBE_CAM = { value: new THREE.Vector3() };     // the camera in the globe's own frame
 const GLABELS = [];
 // fossil sites and boundary sections (pipeline/sites.py): today's places moved to 66 Ma with the PALEOMAP plate model
 const SITES = (META.sites ? META.sites.list : []).map(st => {
@@ -2788,9 +3072,10 @@ async function loadPxQuiet(url) {
   const bmp = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
   const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
   const g = cv.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0);
-  return { px: g.getImageData(0, 0, bmp.width, bmp.height).data, w: bmp.width };
+  bmp.close();
+  return { px: g.getImageData(0, 0, cv.width, cv.height).data, w: cv.width };
 }
-let earthMesh = null;          // the globe, once built (VR swaps its geometry for coarser ones)
+let earthMesh = null, todayCoast = null;          // the globe, once built (VR swaps its geometry for coarser ones)
 function ensureGlobe() {
   if (globeReady) return globeReady;
   globeReady = (async () => {
@@ -2810,8 +3095,9 @@ function ensureGlobe() {
     CPU.gT = new Float32Array(nx * ny); CPU.gA = new Float32Array(nx * ny); CPU.gL = new Uint8Array(nx * ny); CPU.gH = new Float32Array(nx * ny);
     for (let i = 0; i < nx * ny; i++) { const k = i * 4, tq = w.px[k] * 256 + w.px[k + 1]; CPU.gT[i] = tq === 65535 ? -1 : tq * GLB.w.tstep; CPU.gA[i] = Math.pow(w.px[k + 2] / 255, 2) * GLB.w.eta_max; CPU.gL[i] = h.px[k + 2] > 127 ? 1 : 0; CPU.gH[i] = (h.px[k] * 256 + h.px[k + 1]) * GLB.h.step + GLB.h.off; }
 
-    const earth = new THREE.Mesh(new THREE.SphereGeometry(1, SMALL ? 512 : 1024, SMALL ? 256 : 512), new THREE.ShaderMaterial({
-      uniforms: { ...U, uCamO: GLOBE_CAM }, extensions: { derivatives: true },
+    const earth = new THREE.Mesh(new THREE.SphereGeometry(1, SMALL ? 512 : 1024, SMALL ? 256 : 512), shaderMat({
+      uniforms: U, extensions: { derivatives: true },
+      polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 4,
       vertexShader: VS_HEAD + COMMON + GL_COMMON + `
 varying vec3 vP, vOp, vWp; varying vec2 vFxz; varying float vDist;
 void main() {
@@ -2820,19 +3106,17 @@ void main() {
   vec3 q = uGM * p; float qd = length(q.xz); vFxz = (qd > 0.0 ? q.xz / qd : vec2(0.0)) * atan(qd, q.y) * R_EARTH;
   vP = p; vOp = p * r; vWp = (modelMatrix * vec4(vOp, 1.0)).xyz; vec4 mv = modelViewMatrix * vec4(vOp, 1.0); vDist = -mv.z;
   gl_Position = projectionMatrix * mv;
-  #include <logdepthbuf_vertex>
 }`,
       fragmentShader: FS_HEAD + COMMON + GL_COMMON + `
-uniform vec3 uCamO;
 // the globe's surface normal (globe frame) from the 0.1 deg topography, finer than the mesh. The step is a texel, or the
 // pixel's footprint when that is larger; far out the mesh's own normal takes over (no shimmer). k: the relief's exaggeration
-vec3 topoN(vec3 p, vec2 uv, vec3 nGeo, float k) {
+vec3 topoN(vec3 p, vec2 ll, vec2 uv, vec3 nGeo, float k) {
   if (uTopo < 0.5) return nGeo;
   vec2 fw = fwidth(uv); if (fw.x > 0.5) fw.x = 0.0;                    // across the date line
   float su = max(1.0 / 3600.0, fw.x), sv = max(1.0 / 1800.0, fw.y);
   float far = smoothstep(2.0, 8.0, max(fw.x * 3600.0, fw.y * 1800.0));
   if (far >= 1.0) return nGeo;
-  vec2 ll = llOf(p); float cl = max(cos(ll.y), 0.02);
+  float cl = max(cos(ll.y), 0.02);
   float gx = (texture2D(tGT, uv + vec2(su, 0.0)).r - texture2D(tGT, uv - vec2(su, 0.0)).r) * k / (2.0 * su * 6.2831853 * R_EARTH * cl);
   float gy = (texture2D(tGT, uv - vec2(0.0, sv)).r - texture2D(tGT, uv + vec2(0.0, sv)).r) * k / (2.0 * sv * 3.1415927 * R_EARTH);
   vec3 east = vec3(-sin(ll.x), 0.0, -cos(ll.x)), north = vec3(-sin(ll.y) * cos(ll.x), cos(ll.y), sin(ll.y) * sin(ll.x));
@@ -2840,31 +3124,25 @@ vec3 topoN(vec3 p, vec2 uv, vec3 nGeo, float k) {
 }
 varying vec3 vP, vOp, vWp; varying vec2 vFxz; varying float vDist;
 void main() {
-  #include <logdepthbuf_fragment>
-  vec3 p = normalize(vP); vec2 uv = uvOf(llOf(p)); vec4 g = texture2D(tGE, uv);
+  vec3 p = normalize(vP); vec2 ll = llOf(p), uv = uvOf(ll); vec4 g = texture2D(tGE, uv);
   vec3 q = uGM * p; float qd = length(q.xz), th = atan(qd, q.y);
   // this point on the regional map: from the vertices, smoothly interpolated (per pixel, atan's rounding put steps of
   // a few hundred metres into it far from the crater, which the fires' fine patterns showed as bricks); near the
   // crater, where the triangles' straight edges would show, per pixel; blended in between, so no seam
   vec2 fxz = mix((qd > 0.0 ? q.xz / qd : vec2(0.0)) * th * R_EARTH, vFxz, smoothstep(0.4, 0.6, th));
   float gsd = gulfSD(fxz); if (length(vOp) < 1.0 && abs(gsd) < 150000.0) gsd = gulfSD(seaCrossXZ(vWp));   // seabed: as the Gulf's (seaCrossXZ)
-  // The detailed Gulf and crater are drawn inside. The two meshes have different cell sizes, so their surfaces differ by
-  // up to kilometres where the relief is exaggerated, and seen at a slant an exact cut-over leaves slivers that neither
-  // draws (most visible in VR, looking along the ground with two eyes). So the globe carries on 60 km under the Gulf's
-  // edge, set slightly back in depth: the Gulf covers it wherever the Gulf draws, and it fills the slivers.
+  // The detailed Gulf and crater are drawn inside; polygonOffset pushes the globe slightly back in depth in the 60 km overlap.
   if (gsd < -60000.0) discard;
-  #if defined( USE_LOGDEPTHBUF ) && defined( USE_LOGDEPTHBUF_EXT )
-  if (gsd < 0.0) gl_FragDepthEXT += 2e-4;                 // about 0.4% further away
-  #endif
   vec3 n = normalize(cross(dFdx(vOp), dFdy(vOp))); if (dot(n, p) < 0.0) n = -n;
   // lit everywhere as the crater region is (sun from the south-east, 38 deg up): no fixed night side, since the Earth
   // turns under the Sun through the days and years shown
-  vec3 sunL = transpose(uGM) * fromFlat(uSunDir, fxz);
+  vec3 sunL = uGMInv * fromFlat(uSunDir, fxz);
   float sunUp = dot(p, sunL), day = 1.0;
-  vec3 light = uSunCol * max(dot(n, sunL), 0.0) * 0.5 + mix(uGndCol, uSkyCol, 0.5 + 0.5 * dot(n, p)) * 1.1;
   float nzv = 0.86 + 0.2 * nz(fxz / 60000.0) + 0.1 * nz(fxz / 7000.0 + 0.4);
   float h = globeH(uv, uTopo > 0.5 ? texture2D(tGT, uv).r : g.r); bool land = h > 0.0;    // the 0.1 deg heights and the fine coast, where loaded
-  n = topoN(p, uv, n, land ? uGEx : min(uGEx, uExag)); light = uSunCol * max(dot(n, sunL), 0.0) * 0.5 + mix(uGndCol, uSkyCol, 0.5 + 0.5 * dot(n, p)) * 1.1;
+  // Deep seafloor (>250 m) is fully attenuated by seawater (exp(-9) < 0.0001), so skip 4 topoN fetches on ~65% of Earth
+  if (land || h > -250.0) n = topoN(p, ll, uv, n, land ? uGEx : min(uGEx, uExag));
+  vec3 light = uSunCol * max(dot(n, sunL), 0.0) * 0.5 + mix(uGndCol, uSkyCol, 0.5 + 0.5 * dot(n, p)) * 1.1;
   vec3 col;
   if (land) {                                        // 66 Ma land, the same colours as the Gulf's
     col = landAlb(uv, h) * mix(nzv, 1.0, uLC * 0.6) * light;
@@ -2872,36 +3150,40 @@ void main() {
     float d = -h; vec3 att = exp(-2.0 * d * vec3(0.22, 0.045, 0.018));
     col = uLith[1] * 0.5 * nzv * light * att + waterCol(d) * (1.0 - att.g);
     float eta = gEta(uv), k = clamp(eta / 300.0, -1.0, 1.0);
-    vec3 V = normalize(uCamO - vOp), R = reflect(-V, p);
-    float fr = 0.02 + 0.98 * pow(1.0 - max(dot(p, V), 0.0), 5.0), spec = pow(max(dot(R, sunL), 0.0), 350.0) * 5.0 * (1.0 - uFrW.y);   // every place has the crater's sun, so a glint would trace an arc round the globe: it fades far out
+    vec3 camO = (uEarthInv * vec4(cameraPosition, 1.0)).xyz;
+    vec3 V = normalize(camO - vOp), R = reflect(-V, p);
+    float f1 = 1.0 - max(dot(p, V), 0.0), f2 = f1 * f1, fr = 0.02 + 0.98 * f2 * f2 * f1;
+    float spec = pow(max(dot(R, sunL), 0.0), 350.0) * 5.0 * (1.0 - uFrW.y);   // every place has the crater's sun, so a glint would trace an arc round the globe: it fades far out
     vec3 sfc = mix(uHor, uZen, clamp(dot(R, p) * 1.6, 0.0, 1.0)) * 1.4 + uSunCol * spec + vec3(1.0, 0.62, 0.34) * max(k, 0.0) * 0.6;
     col = mix(col, sfc, clamp(0.1 + 0.85 * fr + spec + 0.35 * abs(k), 0.0, 1.0));
     col = tsunamiTint(col, eta);
-    if (g.g < 3900.0 && uT > 0.0) col += vec3(1.0, 0.85, 0.6) * exp(-pow((uT - g.g * 60.0) / 900.0, 2.0)) * 0.25 * uFrW.y;   // the leading front
+    if (g.g < 3900.0 && uT > 0.0 && uFrW.y > 0.001) { float df = (uT - g.g * 60.0) / 900.0; col += vec3(1.0, 0.85, 0.6) * exp(-df * df) * 0.25 * uFrW.y; }   // the leading front
   }
   float fa = fireAge(uv, fxz, land, h); col = fireScar(col, fa, fxz);
   col = climateFx(col, uv, land, h, light, sunUp, day);
   col = fireGlow(col, fa, fwidth(fa), length(fwidth(fxz)), uv, fxz, light);
   col = reentryFx(col, uv);
-  if (uT > 0.0) {
+  if (uT > 0.0 && (uFrGK.x + uFrGK.y + uFrGK.z) > 0.001) {
     // fronts: P (blue) and S (yellow) waves, surface waves (orange, by shaking intensity), the air blast (white)
-    float ang = th, w = uFrW.x / R_EARTH;
-    col += vec3(0.5, 0.8, 1.0) * exp(-pow((ang - uFrG.x) / w, 2.0)) * 0.6 * uFrGK.x;
-    col += vec3(1.0, 0.85, 0.4) * exp(-pow((ang - uFrG.y) / w, 2.0)) * 0.6 * uFrGK.x;
-    col += vec3(1.0, 0.45, 0.2) * exp(-pow((ang - uFrG.z) / (2.0 * w), 2.0)) * uFrGK.y * (0.3 + mmiOf(ang * 6371.0) / 12.0);
-    col += vec3(0.9, 0.95, 1.0) * exp(-pow((ang - uFrG.w) / (1.5 * w), 2.0)) * uFrGK.z * clamp(0.3 + log(overP(ang * 6371000.0) / 1000.0) / log(10.0) / 4.0, 0.15, 1.0);
+    float ang = th, iw = R_EARTH / uFrW.x;
+    if (uFrGK.x > 0.001) {
+      float dx = (ang - uFrG.x) * iw, dy = (ang - uFrG.y) * iw;
+      col += (vec3(0.5, 0.8, 1.0) * exp(-dx * dx) + vec3(1.0, 0.85, 0.4) * exp(-dy * dy)) * 0.6 * uFrGK.x;
+    }
+    if (uFrGK.y > 0.001) { float dz = (ang - uFrG.z) * (0.5 * iw); col += vec3(1.0, 0.45, 0.2) * exp(-dz * dz) * uFrGK.y * (0.3 + mmiOf(ang * 6371.0) / 12.0); }
+    if (uFrGK.z > 0.001) { float dw = (ang - uFrG.w) * (0.6666667 * iw); col += vec3(0.9, 0.95, 1.0) * exp(-dw * dw) * uFrGK.z * clamp(0.3 + log(overP(ang * 6371000.0) / 1000.0) / log(10.0) / 4.0, 0.15, 1.0); }
   }
   gl_FragColor = vec4(fogIt(col, vDist), 1.0);
 }`,
     }));
     earth.matrixAutoUpdate = false; earth.matrix.copy(EARTH_M); earth.frustumCulled = false; scene.add(earth); earthMesh = earth;
     // the limb's glow (normal and view direction both in world space: in the globe's own frame it drew a band across the disc)
-    const air = new THREE.Mesh(new THREE.SphereGeometry(1.035, 128, 64), new THREE.ShaderMaterial({
+    const air = new THREE.Mesh(new THREE.SphereGeometry(1.035, 64, 32), shaderMat({
       uniforms: GU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-      vertexShader: VS_HEAD + 'varying vec3 vN, vW; void main() { vN = normalize(mat3(modelMatrix) * position); vec4 wp = modelMatrix * vec4(position, 1.0); vW = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp;\n#include <logdepthbuf_vertex>\n}',
-      fragmentShader: FS_HEAD + 'uniform vec3 uSunG; varying vec3 vN, vW; void main() {\n#include <logdepthbuf_fragment>\n float f = pow(1.0 - abs(dot(normalize(vN), normalize(cameraPosition - vW))), 3.0); gl_FragColor = vec4(vec3(0.3, 0.5, 1.0) * 0.55 * f * 1.0, 1.0); }',
+      vertexShader: VS_HEAD + 'varying vec3 vN, vW; void main() { vN = normalize(mat3(modelMatrix) * position); vec4 wp = modelMatrix * vec4(position, 1.0); vW = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp; }',
+      fragmentShader: FS_HEAD + 'uniform vec3 uSunG; varying vec3 vN, vW; void main() { float t = 1.0 - abs(dot(normalize(vN), normalize(cameraPosition - vW))); gl_FragColor = vec4(vec3(0.3, 0.5, 1.0) * 0.55 * t * t * t, 1.0); }',
     }));
-    air.matrixAutoUpdate = false; air.matrix.copy(EARTH_M); air.frustumCulled = false; air.visible = airOn; scene.add(air); airMesh = air;
+    air.matrixAutoUpdate = false; air.matrix.copy(EARTH_M); air.frustumCulled = false; air.renderOrder = 1; air.visible = airOn; scene.add(air); airMesh = air;
     // today's coastlines at their 66 Ma positions, dashed and faint
     const pos = [];
     for (const line of GLB.today) for (let i = 0; i < line.length - 1; i++) {
@@ -2911,10 +3193,10 @@ void main() {
       pos.push(va.x, va.y, va.z, vb.x, vb.y, vb.z);
     }
     const cg = new THREE.BufferGeometry(); cg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const coastG = new THREE.LineSegments(cg, new THREE.ShaderMaterial({ transparent: true, depthWrite: false,
-      vertexShader: VS_HEAD + 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);\n#include <logdepthbuf_vertex>\n}',
-      fragmentShader: FS_HEAD + 'void main() {\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(0.75, 0.85, 0.9, 0.35); }' }));
-    coastG.name = 'todayCoast'; coastG.visible = showCoast; coastG.matrixAutoUpdate = false; coastG.matrix.copy(EARTH_M); coastG.frustumCulled = false; scene.add(coastG);
+    const coastG = new THREE.LineSegments(cg, shaderMat({ transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      vertexShader: VS_HEAD + 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: FS_HEAD + 'void main() { gl_FragColor = vec4(0.75, 0.85, 0.9, 0.35); }' }));
+    coastG.name = 'todayCoast'; coastG.visible = showCoast; coastG.matrixAutoUpdate = false; coastG.matrix.copy(EARTH_M); coastG.frustumCulled = false; scene.add(coastG); todayCoast = coastG;
     for (const L of [{ text: 'Chicxulub', v: worldOfLL(GLB.impact.lon, GLB.impact.lat, 1.004), kind: 'impact' }, ...GLB.labels.map(L => ({ text: L.text, v: worldOfLL(L.lon, L.lat, 1.001), kind: 'water' }))]) {
       const el = document.createElement('div'); el.className = 'label glabel ' + L.kind; el.textContent = tr(L.text); document.body.appendChild(el); GLABELS.push({ ...L, el });
     }
@@ -2934,10 +3216,10 @@ function frontsNow(t) {
   const rb = blastR(t); out.B = Math.acos(Math.cos(rb / RE_M)); out.kB = fxOn.blast ? Math.exp(-t / (40 * 3600)) : 0;
   return out;
 }
-const blastWall = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 192, 1, true).translate(0, 0.5, 0), new THREE.ShaderMaterial({
+const blastWall = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 192, 1, true).translate(0, 0.5, 0), shaderMat({
   uniforms: { uK: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  vertexShader: VS_HEAD + COMMON.slice(0, COMMON.indexOf('uniform sampler2D tTgt')) + 'varying float vY; void main() { vY = uv.y; gl_Position = projectionMatrix * viewMatrix * vec4(bend((modelMatrix * vec4(position, 1.0)).xyz), 1.0);\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: FS_HEAD + 'uniform float uK; varying float vY; void main() {\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(vec3(0.75, 0.85, 1.0) * uK * pow(1.0 - vY, 2.0), 1.0); }',
+  vertexShader: VS_HEAD + COMMON.slice(0, COMMON.indexOf('uniform sampler2D tTgt')) + 'varying float vY; void main() { vY = uv.y; gl_Position = projectionMatrix * viewMatrix * vec4(bend((modelMatrix * vec4(position, 1.0)).xyz), 1.0); }',
+  fragmentShader: FS_HEAD + 'uniform float uK; varying float vY; void main() { float q = 1.0 - vY; gl_FragColor = vec4(vec3(0.75, 0.85, 1.0) * uK * q * q, 1.0); }',
 }));
 blastWall.frustumCulled = false; blastWall.renderOrder = 6; blastWall.visible = false; scene.add(blastWall);
 // a point of the regional view, in the 66 Ma (paleo) frame of the globe data
@@ -2997,10 +3279,10 @@ function updateEffects() {
 }
 // the probe: click the globe for what reached that place, and when
 const probeState = { on: false, lon: 0, lat: 0, site: null };
-const probePin = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)), new THREE.ShaderMaterial({
+const probePin = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)), shaderMat({
   transparent: true, depthTest: false,
-  vertexShader: VS_HEAD + 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = 14.0;\n#include <logdepthbuf_vertex>\n}',
-  fragmentShader: FS_HEAD + 'void main() {\n#include <logdepthbuf_fragment>\n float r = length(gl_PointCoord * 2.0 - 1.0); if (r > 1.0) discard; gl_FragColor = vec4(vec3(1.0, 0.48, 0.21) * (r > 0.6 ? 1.0 : 0.25), r > 0.6 ? 1.0 : 0.6); }',
+  vertexShader: VS_HEAD + 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = 14.0; }',
+  fragmentShader: FS_HEAD + 'void main() { float r = length(gl_PointCoord * 2.0 - 1.0); if (r > 1.0) discard; gl_FragColor = vec4(vec3(1.0, 0.48, 0.21) * (r > 0.6 ? 1.0 : 0.25), r > 0.6 ? 1.0 : 0.6); }',
 }));
 probePin.visible = false; probePin.renderOrder = 9; probePin.frustumCulled = false; scene.add(probePin);
 const sig2 = x => x >= 100 ? grp(Math.round(Number(x.toPrecision(2)))) : dec(Number(x.toPrecision(2)));
@@ -3100,16 +3382,31 @@ if (!CLM.scenarios.some(s => s.id === CL.scen)) CL.scen = CLM.scenarios[0].id;
 const clScen = () => CLM.scenarios.find(s => s.id === CL.scen);
 function ensureClimate() {
   if (CL.ready) return CL.ready;
-  CL.ready = Promise.all(CLM.scenarios.map(async sc => {
-    const im = await loadPxQuiet('data/' + sc.file), nx = CLM.nx, ny = CLM.ny, pr = CLM.per_row, data = new Uint8Array(nx * ny * 4 * CL_N);
-    for (let k = 0; k < CL_N; k++) {
-      const r0 = Math.floor(k / pr) * ny, c0 = (k % pr) * nx;
-      for (let y = 0; y < ny; y++) { const src = ((r0 + y) * im.w + c0) * 4, dst = (k * ny + y) * nx * 4; data.set(im.px.subarray(src, src + nx * 4), dst); }
+  CL.ready = (async () => {
+    const nx = CLM.nx, ny = CLM.ny, pr = CLM.per_row;
+    const decoded = await Promise.all(CLM.scenarios.map(async sc => {
+      let data;
+      if (decodeWorker) {
+        const r = await decodeWorker({ op: 'climate', url: absWebp('data/' + sc.file), nx, ny, per_row: pr, n: CL_N });
+        data = new Uint8Array(r.data);
+      } else {
+        const im = await loadPxQuiet('data/' + sc.file);
+        data = new Uint8Array(nx * ny * 4 * CL_N);
+        for (let k = 0; k < CL_N; k++) {
+          const r0 = Math.floor(k / pr) * ny, c0 = (k % pr) * nx;
+          for (let y = 0; y < ny; y++) { const src = ((r0 + y) * im.w + c0) * 4, dst = (k * ny + y) * nx * 4; data.set(im.px.subarray(src, src + nx * 4), dst); }
+        }
+      }
+      return [sc, data];
+    }));
+    for (const [sc, data] of decoded) {
+      const t = new THREE.DataArrayTexture(data, nx, ny, CL_N); t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType;
+      t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
+      CL.data[sc.id] = data; CL.tex[sc.id] = t;
+      await nextFrame();
     }
-    const t = new THREE.DataArrayTexture(data, nx, ny, CL_N); t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType;
-    t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
-    CL.data[sc.id] = data; CL.tex[sc.id] = t;
-  })).then(() => setScen(CL.scen));
+    setScen(CL.scen);
+  })();
   return CL.ready;
 }
 // frames either side of t, the log-time weight between them, and how far the effects have built up (before the first frame)
@@ -3158,9 +3455,10 @@ function drawChart() {
 let clTxt = 0;
 function updateClimate() {
   const t = S.imp.t, long = P > PS - 1e-6;
-  document.body.classList.toggle('long-mode', long);
   const [k0, k1, w, a] = clFrame(t), ready = !!CL.data[CL.scen];
   GU.uCL.value.set(k0, k1, w, a); GU.uCLv.value.y = ready ? 1 : 0;
+  if (xrOn) return;
+  document.body.classList.toggle('long-mode', long);
   if (!long || !ready) return;
   const now = performance.now(); if (now - clTxt < 100) return; clTxt = now;
   // global values for the card, from the chart series
@@ -3180,44 +3478,51 @@ const skyU = { uUp: { value: new THREE.Vector3(0, 1, 0) }, uSun: { value: sunDir
 // sky is held with right ascension 0h over the paleo map's 0 deg meridian. A world direction -> globe frame (uEqI) ->
 // RA = longitude, Dec = latitude.
 const SKY_ZEN = new THREE.Color(0.05, 0.13, 0.32), SKY_HOR = new THREE.Color(0.3, 0.42, 0.56);
-const sky = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), new THREE.ShaderMaterial({
-  uniforms: skyU, side: THREE.BackSide, depthWrite: false, depthTest: false,
-  vertexShader: VS_HEAD + 'varying vec3 vD; void main() { vD = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);\n#include <logdepthbuf_vertex>\n}',
+// Drawn last in the opaque pass at exact far-plane depth (clip.xyww + LessEqualDepth) so hardware Early-Z skips every pixel covered by Earth/Gulf/Crater,
+// and mat3(viewMatrix) follows each VR eye rotation with zero lag.
+const sky = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), shaderMat({
+  uniforms: skyU, side: THREE.BackSide, depthWrite: false, depthTest: true, depthFunc: THREE.LessEqualDepth,
+  vertexShader: VS_HEAD + 'varying vec3 vD; void main() { vD = position; vec4 clip = projectionMatrix * vec4(mat3(viewMatrix) * position, 1.0); gl_Position = clip.xyww; }',
   fragmentShader: FS_HEAD + `uniform vec3 uUp, uSun, uSkyHaze; uniform vec4 uSky, uSkyA; uniform sampler2D tMW; uniform float uMW; uniform mat3 uEqI; varying vec3 vD;
 // uSky: light (fraction), haze, re-entry glow, -; uSkyA: in the air (0-1), underground (0-1)
 void main() {
-  #include <logdepthbuf_fragment>
-  vec3 d = normalize(vD); float e = dot(d, uUp), k = clamp(1.0 + log(max(uSky.x, 1e-6)) / log(10.0) / 3.0, 0.0, 1.0);
-  vec3 col = mix(vec3(${SKY_HOR.r}, ${SKY_HOR.g}, ${SKY_HOR.b}), vec3(${SKY_ZEN.r}, ${SKY_ZEN.g}, ${SKY_ZEN.b}), pow(clamp(e, 0.0, 1.0), 0.45));
-  col = mix(col, vec3(${SKY_HOR.r}, ${SKY_HOR.g}, ${SKY_HOR.b}) * 0.6, smoothstep(0.0, -0.2, e));
-  float sd = max(dot(d, uSun), 0.0);
-  col += vec3(1.0, 0.9, 0.7) * (pow(sd, 2500.0) * 40.0 + pow(sd, 40.0) * 0.25) * (1.0 - uSky.y);      // the Sun and its glare, lost in thick haze
-  col *= mix(0.03, 1.0, k);                                                                           // the impact winter's darkness
-  col = mix(col, uSkyHaze * mix(0.05, 0.9, k), 0.85 * uSky.y);
-  col += vec3(0.9, 0.12, 0.02) * uSky.z * (0.35 + 0.65 * pow(clamp(e, 0.0, 1.0), 0.3));               // re-entering ejecta: the sky glows red
-  vec3 q = uEqI * d; float ra = atan(-q.z, q.x), de = asin(clamp(q.y, -1.0, 1.0));
-  vec3 space = vec3(0.002, 0.0025, 0.004) + (uMW > 0.0 ? texture2D(tMW, vec2(fract(0.5 - ra / 6.2831853), 0.5 - de / 3.1415927)).rgb * uMW : vec3(0.0));   // the Milky Way (NASA SVS, Gaia DR2)
-  col = mix(space, col, uSkyA.x);
+  vec3 d = normalize(vD);
+  vec3 col = vec3(0.0);
+  if (uSkyA.x > 0.001) {
+    float e = dot(d, uUp), k = clamp(1.0 + log(max(uSky.x, 1e-6)) / log(10.0) / 3.0, 0.0, 1.0);
+    col = mix(vec3(${SKY_HOR.r}, ${SKY_HOR.g}, ${SKY_HOR.b}), vec3(${SKY_ZEN.r}, ${SKY_ZEN.g}, ${SKY_ZEN.b}), pow(clamp(e, 0.0, 1.0), 0.45));
+    col = mix(col, vec3(${SKY_HOR.r}, ${SKY_HOR.g}, ${SKY_HOR.b}) * 0.6, smoothstep(0.0, -0.2, e));
+    float sd = max(dot(d, uSun), 0.0);
+    col += vec3(1.0, 0.9, 0.7) * (pow(sd, 2500.0) * 40.0 + pow(sd, 40.0) * 0.25) * (1.0 - uSky.y);      // the Sun and its glare, lost in thick haze
+    col *= mix(0.03, 1.0, k);                                                                           // the impact winter's darkness
+    col = mix(col, uSkyHaze * mix(0.05, 0.9, k), 0.85 * uSky.y);
+    if (uSky.z > 0.001) col += vec3(0.9, 0.12, 0.02) * uSky.z * (0.35 + 0.65 * pow(clamp(e, 0.0, 1.0), 0.3));   // re-entering ejecta: the sky glows red
+  }
+  if (uSkyA.x < 0.999) {
+    vec3 q = uEqI * d; float ra = atan(-q.z, q.x), de = asin(clamp(q.y, -1.0, 1.0));
+    vec3 space = vec3(0.002, 0.0025, 0.004) + (uMW > 0.0 ? texture2D(tMW, vec2(fract(0.5 - ra / 6.2831853), 0.5 - de / 3.1415927)).rgb * uMW : vec3(0.0));   // the Milky Way (NASA SVS, Gaia DR2)
+    col = mix(space, col, uSkyA.x);
+  }
   col = mix(col, vec3(0.012, 0.014, 0.016), uSkyA.y);
   gl_FragColor = vec4(col, 1.0);
 }`,
 }));
-sky.frustumCulled = false; sky.renderOrder = -10; scene.add(sky);
+sky.frustumCulled = false; sky.renderOrder = 10; scene.add(sky);
 // the bright stars (Yale Bright Star Catalogue, to magnitude 6.5): size and brightness by magnitude, colour by B-V
 const starU = { uStarA: { value: 0 }, uStarPx: { value: 1 } };
-const stars = new THREE.Points(new THREE.BufferGeometry(), new THREE.ShaderMaterial({
-  uniforms: starU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+const stars = new THREE.Points(new THREE.BufferGeometry(), shaderMat({
+  uniforms: starU, transparent: true, depthWrite: false, depthTest: true, depthFunc: THREE.LessEqualDepth, blending: THREE.AdditiveBlending,
   vertexShader: VS_HEAD + `attribute vec4 aS; uniform float uStarPx; varying vec3 vC; varying float vB;
 void main() {
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 mv = vec4(mat3(viewMatrix) * position, 1.0);
+  if (mv.z >= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  gl_Position = (projectionMatrix * mv).xyww;
   float f = pow(10.0, -0.4 * (aS.w - 1.0));                     // flux relative to a first-magnitude star
   gl_PointSize = clamp(2.2 + 1.8 * log(1.0 + f * 4.0), 2.2, 9.0) * uStarPx;
   vB = clamp(0.45 + 1.6 * sqrt(f), 0.45, 3.0); vC = aS.rgb;
-  #include <logdepthbuf_vertex>
 }`,
   fragmentShader: FS_HEAD + `uniform float uStarA; varying vec3 vC; varying float vB;
 void main() {
-  #include <logdepthbuf_fragment>
   vec2 q = gl_PointCoord * 2.0 - 1.0; float r2 = dot(q, q); if (r2 > 1.0) discard;
   gl_FragColor = vec4(vC * vB * uStarA * exp(-4.0 * r2), 1.0);
 }`,
@@ -3227,13 +3532,11 @@ function bvColor(bv) {          // B-V -> a star's colour (blue-white to orange)
   const K = [[-0.4, [0.55, 0.65, 1.0]], [0.0, [0.75, 0.82, 1.0]], [0.4, [1.0, 0.97, 0.92]], [0.8, [1.0, 0.86, 0.66]], [1.2, [1.0, 0.74, 0.47]], [2.0, [1.0, 0.6, 0.32]]];
   for (let i = 0; i < K.length - 1; i++) if (bv <= K[i + 1][0] || i === K.length - 2) { const t = clamp((bv - K[i][0]) / (K[i + 1][0] - K[i][0]), 0, 1); return K[i][1].map((c, j) => c + (K[i + 1][1][j] - c) * t); }
 }
-let skyReq = null;
+let skyReq = null, starsLoaded = false;
 function loadSky() {
   if (skyReq) return skyReq;
   const SK = META.sky; if (!SK) return (skyReq = Promise.resolve());
-  skyReq = Promise.all([loadPxQuiet('data/' + SK.mw.file), fetch('data/' + SK.stars).then(r => r.json())]).then(([im, st]) => {
-    const t = new THREE.DataTexture(new Uint8Array(im.px.buffer.slice(0)), im.w, im.px.length / 4 / im.w, THREE.RGBAFormat, THREE.UnsignedByteType);
-    t.colorSpace = THREE.SRGBColorSpace; t.magFilter = t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true;
+  skyReq = Promise.all([loadColorTex('data/' + SK.mw.file, true), fetch('data/' + SK.stars).then(r => r.json())]).then(([t, st]) => {
     skyU.tMW.value = t; skyU.uMW.value = 0.9 / SK.mw.gain;
     const n = st.stars.length, pos = new Float32Array(n * 3), at = new Float32Array(n * 4), v = new THREE.Vector3();
     st.stars.forEach(([ra, de, vm, bv], i) => {
@@ -3241,20 +3544,20 @@ function loadSky() {
       const c = bvColor(bv); at.set([c[0], c[1], c[2], vm], i * 4);
     });
     stars.geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3)); stars.geometry.setAttribute('aS', new THREE.BufferAttribute(at, 4));
-    stars.visible = true;
+    starsLoaded = true; stars.visible = starU.uStarA.value > 0.001;
   });
   return skyReq;
 }
-const _sk = new THREE.Vector3();
+const _sk = new THREE.Vector3(), _skAx = new THREE.Vector3();
 function updateSky() {
   const alt = altitude(), t = S.imp.t;
-  sky.position.copy(camera.position); sky.scale.setScalar(Math.max(1e5, camera.far * 0.5));
-  stars.position.copy(camera.position); stars.scale.setScalar(Math.max(1e5, camera.far * 0.45)); starU.uStarPx.value = pr;
+  starU.uStarPx.value = pr;
   starU.uStarA.value = smooth(25e3, 160e3, alt);              // above the air's glow
+  stars.visible = starsLoaded && starU.uStarA.value > 0.001;
   skyU.uUp.value.copy(camera.position).sub(EC).normalize();
   // the Sun for this place: the crater region's sun, carried round in the map's frame (as the ground is lit)
   const f = unbendV(camera.position), dd = Math.hypot(f.x, f.z), th = dd / RE_M;
-  _sk.copy(sunDir); if (dd > 1) _sk.applyAxisAngle(new THREE.Vector3(f.z / dd, 0, -f.x / dd), th);
+  _sk.copy(sunDir); if (dd > 1) _sk.applyAxisAngle(_skAx.set(f.z / dd, 0, -f.x / dd), th);
   skyU.uSun.value.copy(_sk);
   let light = 1, glow = 0;
   if (t > 0) {
@@ -3301,11 +3604,15 @@ function declutter() {
 }
 // the globe is the far end of the zoom: zoom out to see the whole Earth, back in to reach the crater
 let globeMode = false;
+function syncGlobeDom() {
+  document.body.classList.toggle('globe-mode', globeMode); $('globeBtn').setAttribute('aria-pressed', String(globeMode));
+  $('place').textContent = tr(globeMode ? 'Chicxulub · the Earth 66 million years ago' : 'Chicxulub · Yucatán shelf');
+  if (globeMode) { const h = $('modeHint'); h.textContent = tr('Click anywhere on the globe to see what reached it, and when · double-click to fly back to the crater'); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
+}
 function setGlobeMode(on) {
   if (on === globeMode) return;
-  globeMode = on; document.body.classList.toggle('globe-mode', on); $('globeBtn').setAttribute('aria-pressed', String(on));
-  $('place').textContent = tr(on ? 'Chicxulub · the Earth 66 million years ago' : 'Chicxulub · Yucatán shelf');
-  if (on) { const h = $('modeHint'); h.textContent = tr('Click anywhere on the globe to see what reached it, and when · double-click to fly back to the crater'); h.classList.add('show'); clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove('show'), 6000); }
+  globeMode = on;
+  if (!xrOn) syncGlobeDom();
 }
 function globeView() { const k = far(); return [EC.clone().add(toV(-60, 14).applyMatrix4(GM_ROT).multiplyScalar(RE_M * 3.4 * k)), EC.clone()]; }   // the Atlantic hemisphere
 async function enterGlobe(instant, centre) {          // centre [lon, lat]: look down on it (else the Atlantic hemisphere); north up
@@ -3441,44 +3748,79 @@ addEventListener('keydown', e => {
 // headset's metres become the rig's scale in the world, which gives stereo depth and head movement at any zoom.
 // No bloom or place labels in VR; the interface is the panel further down.
 const rig = new THREE.Group(); rig.visible = false; scene.add(rig);          // holds the panel and pointers: shown only in VR
-let xrOn = false, xrPatched = false;
+let xrOn = false;
 if (location.search.includes('xrsim')) {          // development: an emulated Quest 3 (Meta's IWER) for browsers without a headset; drive it through window.__xr
   const { XRDevice, metaQuest3 } = await import('https://cdn.jsdelivr.net/npm/iwer@2.8.0/+esm'); window.__xr = new XRDevice(metaQuest3); window.__xr.installRuntime({ forceInstall: true });
 }
 renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local');
 // These shaders were written for a desktop GPU, and a headset draws them twice, at a high resolution, 72+ times a second.
-// So: full foveation (coarser toward the edges), meshes only as fine
-// as their size in view needs (xrLod), and a viewport that shrinks further while frames come late and grows back when they do not.
+// So: full foveation (coarser toward the edges), meshes only as fine as their size in view needs (xrLod), and a viewport
+// scale driven by non-blocking GPU timer queries (or VSync-miss backoff when unavailable) so frames stay locked to refresh.
 renderer.xr.setFramebufferScaleFactor(1); renderer.xr.setFoveation(1);
-let xrScale = 0.8, xrDt = 0.014, xrLast = 0, xrTune = 0;
+let xrScale = 0.85, xrDt = 0.014, xrLast = 0, xrTune = 0, xrGrowHold = 0, xrBackoff = 0;
+const xrTimerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+const xrQueries = [];
+let xrGpuMs = 0, xrTimerActive = false;
+function xrTimerPoll() {
+  if (!xrTimerExt) return;
+  const disjoint = gl.getParameter(xrTimerExt.GPU_DISJOINT_EXT);
+  while (xrQueries.length) {
+    const q = xrQueries[0];
+    if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
+    xrQueries.shift();
+    if (!disjoint) {
+      const ms = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6;
+      if (ms > 0.1 && ms < 100) xrGpuMs = xrGpuMs ? xrGpuMs + (ms - xrGpuMs) * 0.2 : ms;
+    }
+    gl.deleteQuery(q);
+  }
+}
+function xrTimerBegin() {
+  if (!xrTimerExt || xrQueries.length >= 4) { xrTimerActive = false; return; }
+  const q = gl.createQuery();
+  if (!q) { xrTimerActive = false; return; }
+  gl.beginQuery(xrTimerExt.TIME_ELAPSED_EXT, q);
+  xrQueries.push(q); xrTimerActive = true;
+}
+function xrTimerEnd() {
+  if (!xrTimerActive) return;
+  gl.endQuery(xrTimerExt.TIME_ELAPSED_EXT); xrTimerActive = false;
+}
+function xrTimerClear() {
+  xrTimerActive = false; xrGpuMs = 0;
+  while (xrQueries.length) gl.deleteQuery(xrQueries.pop());
+}
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
   const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
   document.body.append(b);
 }).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
-  if (!xrPatched) {          // the composer does tone mapping and sRGB on the desktop; drawn straight to the headset, each shader must (a no-op when drawing into the composer)
-    xrPatched = true;
-    scene.traverse(o => { for (const m of [].concat(o.material || [])) if (m.isShaderMaterial && !m.isRawShaderMaterial && m.fragmentShader.includes('gl_FragColor') && !m.fragmentShader.includes('colorspace_fragment')) {
-      m.fragmentShader = m.fragmentShader.replace(/}\s*$/, '\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'); m.needsUpdate = true; } });
-  }
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
-  xrScale = 0.8; xrLast = 0; xrPlace = true; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  xrScale = 0.85; xrLast = 0; xrTune = 0.5; xrGrowHold = 0; xrBackoff = 0; xrTimerClear();
+  xrPlace = true; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  xrWarmLods();
 });
-renderer.xr.addEventListener('sessionend', () => { xrOn = false; rig.visible = false; xrLod(true); rig.remove(camera); camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 2e9; resize(); updateHud(); });
+renderer.xr.addEventListener('sessionend', () => {
+  xrOn = false; xrTimerClear(); rig.visible = false; xrLod(true); rig.remove(camera);
+  camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 3e7;
+  resize(); syncGlobeDom(); updateClimate(); updateHud();
+});
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
 // The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
-// there: sprite sizes, fades and the logarithmic depth all assume world metres. So just before each draw the eye cameras
+// there: sprite sizes, fades and depth range all assume world metres. So just before each draw the eye cameras
 // are rewritten without the scale: same eye positions in the world, view space in world metres, depth range scaled to match.
-const _one = new THREE.Vector3(1, 1, 1); let xrNear = 1, xrPxT = 800;
+const _one = new THREE.Vector3(1, 1, 1); let xrNear = 1, xrFar = 1e8, xrPxT = 800;
 function pxPerTan() { return xrOn ? xrPxT : renderer.domElement.clientHeight / (2 * Math.tan(deg(camera.fov / 2))); }          // pixels per unit of tangent across the view
+function fixXrCam(c, s) {
+  c.matrixWorld.decompose(_xu, _xq, _xs); c.matrixWorld.compose(_xu, _xq, _one); c.matrixWorldInverse.copy(c.matrixWorld).invert();
+  c.projectionMatrix.elements[14] *= s; c.projectionMatrixInverse.copy(c.projectionMatrix).invert(); c.near = xrNear; c.far = xrFar;
+}
 scene.onBeforeRender = (r, sc, cam) => {
   if (!xrOn || !cam.isArrayCamera) return;
   const s = rig.scale.x;
-  for (const c of [cam, ...cam.cameras]) {
-    c.matrixWorld.decompose(_xu, _xq, _xs); c.matrixWorld.compose(_xu, _xq, _one); c.matrixWorldInverse.copy(c.matrixWorld).invert();
-    c.projectionMatrix.elements[14] *= s; c.projectionMatrixInverse.copy(c.projectionMatrix).invert(); c.near = xrNear; c.far = 2e9;
-  }
+  fixXrCam(cam, s);
+  for (let i = 0; i < cam.cameras.length; i++) fixXrCam(cam.cameras[i], s);
   const e = cam.cameras[0]; if (e) { xrPxT = ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2; starU.uStarPx.value = clamp(e.viewport.w / 1400, 0.4, 1.5); }          // sprite sizes; stars sized for the eye buffer, not the page's pixel ratio
 };
 // ---- the interface in VR: three floating panels around the simulation, worked with a laser pointer from either hand ----
@@ -3645,38 +3987,79 @@ const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vect
 let xrStickAxis = '', xrBtn = 0, xrPlace = true, xrAwake = 6;
 // Mesh detail in VR. The terrain meshes are flat grids that the vertex shaders shape from textures, drawn whole and once
 // per eye: at full density that was 7.4 million triangles a frame. Each one is swapped for a coarser grid while it is
-// small in view (about one cell per 2 mm at arm's length is as fine as the headset shows).
+// small in view (about one cell per 2 mm at arm's length is as fine as the headset shows). Surf/sea and gulfMesh/gulfSea
+// share cached PlaneGeometries to halve GPU buffer allocations, and common LODs are pre-warmed asynchronously on VR entry.
+const xrPlaneCache = new Map();
+const getXrPlane = (size, n) => {
+  const k = `${size}:${n}`;
+  let g = xrPlaneCache.get(k);
+  if (!g) { g = new THREE.PlaneGeometry(size, size, n, n).rotateX(-Math.PI / 2); xrPlaneCache.set(k, g); }
+  return g;
+};
 const xrLods = [[surf, 2 * HALF], [sea, 2 * HALF], [gulfMesh, 2 * GHALF], [gulfSea, 2 * GHALF]].map(([mesh, size]) =>
-  ({ mesh, size, base: mesh.geometry, max: Math.min(mesh.geometry.parameters.widthSegments, 320), cache: {}, make: n => new THREE.PlaneGeometry(size, size, n, n).rotateX(-Math.PI / 2) }));
+  ({ mesh, size, base: mesh.geometry, max: Math.min(mesh.geometry.parameters.widthSegments, 320), make: n => getXrPlane(size, n) }));
+let xrWarmDone = false;
+async function xrWarmLods() {
+  if (xrWarmDone) return;
+  xrWarmDone = true;
+  const jobs = [
+    () => getXrPlane(2 * HALF, 64), () => getXrPlane(2 * HALF, 128), () => getXrPlane(2 * HALF, 256),
+    () => getXrPlane(2 * GHALF, 64), () => getXrPlane(2 * GHALF, 128), () => getXrPlane(2 * GHALF, 192),
+  ];
+  for (const fn of jobs) { await nextFrame(); fn(); }
+  if (earthMesh) {
+    const el = xrLods.find(l => l.mesh === earthMesh);
+    if (el) { await nextFrame(); el.cache[256] ||= el.make(256); }
+  }
+}
 function xrLod(restore, focus) {
   if (earthMesh && !xrLods.some(l => l.mesh === earthMesh))
-    xrLods.push({ mesh: earthMesh, size: 2 * Math.PI * RE_M, base: earthMesh.geometry, max: earthMesh.geometry.parameters.widthSegments, cache: {}, make: n => new THREE.SphereGeometry(1, n, n / 2), earth: true });
-  const s = rig.scale.x;
+    xrLods.push({ mesh: earthMesh, size: 2 * Math.PI * RE_M, base: earthMesh.geometry, max: Math.min(earthMesh.geometry.parameters.widthSegments, 512), cache: {}, make: n => new THREE.SphereGeometry(1, n, n / 2), earth: true });
+  const s = rig.scale.x, alt = altitude();
   // The crater has its own detailed terrain and water. Keep the surrounding Gulf coarse in close crater views.
-  GU.uOrbit.value = !restore && s >= 4e6 && altitude() >= 3e6 ? 1 : 0;
+  GU.uOrbit.value = !restore && s >= 4e6 && alt >= 3e6 ? 1 : 0;
   const gulfOverview = !restore && s >= 8e5 && s <= 3e6 && focus.lengthSq() < GHALF * GHALF;
-  ejGeom.setDrawRange(0, gulfOverview ? Math.min(8000, NEJ) : NEJ);
-  plGeom.setDrawRange(0, gulfOverview ? Math.min(4000, NPL) : NPL);
+  vrEjCap = restore ? NEJ : (gulfOverview || GU.uOrbit.value) ? Math.min(8000, NEJ) : Math.min(30000, NEJ);
+  vrPlCap = restore ? NPL : gulfOverview ? Math.min(4000, NPL) : Math.min(16000, NPL);
   const craterClose = !restore && s <= 2 * HALF && focus.lengthSq() <= HALF * HALF;
   for (const l of xrLods) {
     let n = l.max;
-    if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
-    if ((craterClose || gulfOverview || GU.uOrbit.value) && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, 128);
+    if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 192, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
+    if (!restore && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, (craterClose || gulfOverview || GU.uOrbit.value) ? 128 : 192);
     if (!restore && l.earth && n > 256) {
-      // Use a lighter sphere in the orbital view. Separate zoom thresholds avoid flicker when leaning in VR.
-      const switchAltitude = l.mesh.geometry.parameters.widthSegments === 256 ? 1.75 * RE_M : 2 * RE_M;
-      if (altitude() >= switchAltitude) n = 256;
+      // Use a 256x128 sphere in the Whole Earth preset (alt ~ 0.97 RE) and orbital views; hysteresis avoids flicker when leaning.
+      const switchAltitude = l.mesh.geometry.parameters.widthSegments === 256 ? 0.65 * RE_M : 0.75 * RE_M;
+      if (alt >= switchAltitude) n = 256;
     }
-    const g = restore ? l.base : n === l.base.parameters.widthSegments ? l.base : (l.cache[n] ||= l.make(n));
+    const g = restore ? l.base : n === l.base.parameters.widthSegments ? l.base : (l.cache ? (l.cache[n] ||= l.make(n)) : l.make(n));
     if (l.mesh.geometry !== g) l.mesh.geometry = g;
   }
 }
 function xrBefore(dt) {          // give the app the camera's world pose (three.js keeps the head pose, in rig units, on it), then read the controllers
-  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = 2e9; if (xrPlace) { xrPlace = false; xrSummon(); } }
+  if (camera.parent === rig) { _hp.copy(camera.position); _hq.copy(camera.quaternion); camera.matrixWorld.decompose(camera.position, camera.quaternion, _xs); rig.remove(camera); camera.far = xrFar; if (xrPlace) { xrPlace = false; xrSummon(); } }
   rig.updateMatrixWorld(true);
-  { // frame time (unclamped) -> viewport scale
+  { // GPU time (when available) or VSync-miss backoff -> viewport scale, avoiding 36<->72 Hz sawtooth oscillation
+    xrTimerPoll();
     const now = performance.now(), d = xrLast ? (now - xrLast) / 1000 : xrDt; xrLast = now; xrDt += (Math.min(d, 0.25) - xrDt) * 0.1;
-    if ((xrTune -= d) < 0) { xrTune = 0.5; xrScale = xrDt > 1 / 45 ? Math.max(0.56, xrScale * 0.93) : xrDt < 1 / 66 ? Math.min(1, xrScale * 1.05) : xrScale; }          // sharpness first: shrink only below ~45 fps, gently, and never under 0.56 of the headset's own resolution (text on the panel stays readable); at 1 it is the full eye buffer
+    const hz = renderer.xr.getSession()?.frameRate || 72, budget = 1000 / hz;
+    if (xrBackoff > 0) xrBackoff = Math.max(0, xrBackoff - d);
+    if (xrGpuMs > 0) {
+      if (xrGpuMs < budget * 0.72) xrGrowHold += d; else xrGrowHold = 0;
+      if ((xrTune -= d) <= 0) {
+        xrTune = 0.5;
+        if (xrGpuMs > budget * 0.88) { xrScale = Math.max(0.6, xrScale * 0.92); xrGrowHold = 0; }
+        else if (xrGrowHold >= 2.0) { xrScale = Math.min(1, xrScale + 0.03); xrGrowHold = 0; }
+      }
+    } else {
+      if (d > 1.25 / hz) {
+        if ((xrTune -= d) <= 0) { xrScale = Math.max(0.6, xrScale * 0.92); xrTune = 0.4; xrBackoff = 6; xrGrowHold = 0; }
+      } else {
+        xrTune = Math.max(0, xrTune - d);
+        if (xrBackoff <= 0 && xrDt < 1.08 / hz) {
+          if ((xrGrowHold += d) >= 2.0) { xrScale = Math.min(1, xrScale + 0.03); xrGrowHold = 0; }
+        } else xrGrowHold = 0;
+      }
+    }
     const fr = renderer.xr.getFrame?.(), ref = renderer.xr.getReferenceSpace?.(), pose = fr && ref && fr.getViewerPose(ref);
     if (pose) for (const v of pose.views) v.requestViewportScale?.(xrScale);
   }
@@ -3753,20 +4136,54 @@ function frame(now) {
   if (playing) { setP(P + dt * (SPEED[S.phase] || 0.017) * slow); if (P >= 1) setPlaying(false); }
   if (P !== appliedP) apply(P);
   if (S.imp.t > 0) streamNeeded(S.imp.t);
-  updateEffects(); updateClimate(); updateSky();
-  GU.uT.value = S.imp.t; updateWaveTexture(S.imp.t);
   if (seaTour && playing && S.imp.t > 2500) { seaTour = false; VIEWS.gulf(); }
-  updateFx();
   if (!xrOn) updateCamera(dt);
   const camD = camera.position.distanceTo(controls.target), alt = altitude(), fk = farK();
+  const hasPlume = S.imp.t > 0 && S.imp.t < Math.min(PL_TMAX, 12 * 3600);
+  const horizon = Math.sqrt(Math.max(alt, 5000) * (Math.max(alt, 5000) + 2 * RE_M)) + 5e5;
+  const earthFar = Math.min(Math.max(horizon, hasPlume ? alt + 2.4 * RE_M : 0), alt + 2.5 * RE_M);
+  let farWorld = Math.max(earthFar, xrOn ? 40 * rig.scale.x : 1.5e6);
+  updateEffects(); updateClimate(); updateSky();
+  GU.uT.value = S.imp.t; updateWaveTextures(S.imp.t);
+  updateFx(farWorld);
+  if (rockBall.visible) farWorld = Math.max(farWorld, camera.position.distanceTo(_hd) + 1e5);
   setGlobeMode(fk > 0.5);
   U.uFogD.value = airOn ? (1 - smooth(1.5e6, 6e6, alt)) / Math.max(2.4e6, camD * 2.2) : 0; gulfFill.uFill.value = camD > 1.1e6 ? 1 : 0;
   // relief: the regional exaggeration near the ground, more of it from far away so the continents still read
   U.uGEx.value = mix(exag, 18, smooth(1.5e6, 1.2e7, alt)); U.uFrW.value.set(clamp(alt * 0.004, 3000, 40000), smooth(4e5, 3e6, alt), 0, 0);
-  GLOBE_CAM.value.copy(camera.position).applyMatrix4(EARTH_INV);
-  { const tc = scene.getObjectByName('todayCoast'); if (tc) tc.visible = showCoast && fk > 0.05; }
-  camera.near = clamp(camera.position.distanceTo(controls.target) * 0.0005, 2, 400); camera.updateProjectionMatrix();
-  if (xrOn) { xrDraw(dt); xrNear = camera.near; camera.near /= rig.scale.x; camera.far = 2e9 / rig.scale.x; rig.add(camera); renderer.render(scene, camera); return; }   // near and far in the headset's metres
+  // Horizon & underground culling: skip Crater/Gulf meshes when behind Earth's horizon, and outer walls/base when buried above ground
+  const cf = unbendV(camera.position), cfx = cf.x, cfy = cf.y, cfz = cf.z;
+  const underGround = cfy < 2000 && (cfx * cfx + cfz * cfz) < (2.5 * HALF) * (2.5 * HALF);
+  let craterInView = true, gulfInView = true;
+  if (alt > 3e5) {
+    const camR = alt + RE_M;
+    const hAng = Math.acos(clamp(RE_M / camR, -1, 1)), cAng = Math.acos(clamp((camera.position.y + RE_M) / camR, -1, 1));
+    craterInView = cAng < hAng + 0.06;
+    gulfInView = cAng < hAng + 0.34;
+  }
+  surf.visible = sea.visible = craterInView;
+  coastLines.visible = showCoast && craterInView;
+  face.visible = pitWall.visible = cutMode !== 'off' && craterInView;
+  blockWalls.visible = underGround && craterInView;
+  blockBase.visible = (cutMode !== 'off' || underGround) && craterInView;
+  const gOn = gulfOn();
+  gulfMesh.visible = gulfSea.visible = gulfCoast.visible = gOn && gulfInView;
+  gulfToday.visible = gOn && showCoast && gulfInView;
+  if (todayCoast) todayCoast.visible = showCoast && fk > 0.05;
+  if (xrOn) {
+    xrDraw(dt);
+    const s = rig.scale.x;
+    xrNear = 0.04 * s; xrFar = farWorld;
+    camera.near = 0.04; camera.far = xrFar / s;
+    rig.add(camera);
+    xrTimerBegin(); renderer.render(scene, camera); xrTimerEnd();
+    return;
+  }
+  const g0 = alt < 2e5 ? groundAt(cfx, cfz) : -Infinity;
+  const gNear = g0 !== -Infinity ? Math.max(10, Math.abs(cfy - g0 * exag) * 0.2) : Math.max(10, Math.abs(alt) * 0.15);
+  camera.near = clamp(Math.min(camD * 0.005, gNear), 10, 2e5);
+  camera.far = farWorld;
+  camera.updateProjectionMatrix();
   composer.render();
   updateLabels(); updateGlobeLabels(); declutter();
   updateNavUI(dt);
