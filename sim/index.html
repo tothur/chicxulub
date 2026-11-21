@@ -3791,20 +3791,28 @@ function xrTimerClear() {
   while (xrQueries.length) gl.deleteQuery(xrQueries.pop());
 }
 if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (!ok) return;
-  const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px';          // top centre: its default place is on the dock
+  const b = VRButton.createButton(renderer); b.style.bottom = 'auto'; b.style.top = '14px'; b.style.zIndex = '1001';          // top centre: its default place is on the dock
   document.body.append(b);
 }).catch(() => {});
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.copy(camera.position); rig.quaternion.copy(camera.quaternion); rig.scale.setScalar(Math.max(camera.position.distanceTo(controls.target), 50));
+  if (globeMode) rig.rotateX(-0.085);        // lift opening globe slightly above horizontal so it floats completely clear of the low console
   renderer.xr.getSession()?.updateTargetFrameRate?.(72)?.catch?.(() => {});
   xrScale = 0.85; xrLast = 0; xrTune = 0.5; xrGrowHold = 0; xrBackoff = 0; xrTimerClear();
-  xrPlace = true; xrPreset = ''; xrHelp = false; xrBtn = 0; xrStickAxis = ''; xrAwake = 6; xrGo = null; rig.visible = true; xrOn = true;
+  if (xrDock.parent !== rig) rig.add(xrDock);
+  xrPlace = true; xrPreset = globeMode ? 'earth' : ''; xrDrawer = 'story'; xrMin = false; xrSyncVis();
+  xrBtn = 0; xrStickAxis = ''; xrAwake = 4.5; xrGo = null; rig.visible = true; xrOn = true;
   xrWarmLods();
 });
 renderer.xr.addEventListener('sessionend', () => {
   xrOn = false; xrTimerClear(); rig.visible = false; xrLod(true); rig.remove(camera);
-  camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion); camera.far = 3e7;
-  resize(); syncGlobeDom(); updateClimate(); updateHud();
+  if (xrDock.parent !== rig) rig.add(xrDock);
+  camera.position.copy(rig.position); camera.quaternion.copy(rig.quaternion);
+  camera.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  camera.far = 3e7;
+  controls.update();
+  resize(); requestAnimationFrame(() => resize());
+  syncGlobeDom(); updateClimate(); updateHud();
 });
 const _xs = new THREE.Vector3(), _xq = new THREE.Quaternion(), _xu = new THREE.Vector3();
 // The rig's scale would also shrink view space (the eye's own coordinates) to headset metres, and the shaders measure
@@ -3823,45 +3831,60 @@ scene.onBeforeRender = (r, sc, cam) => {
   for (let i = 0; i < cam.cameras.length; i++) fixXrCam(cam.cameras[i], s);
   const e = cam.cameras[0]; if (e) { xrPxT = ejU.uPS.value = plU.uPlS.value = e.viewport.w * e.projectionMatrix.elements[5] / 2; starU.uStarPx.value = clamp(e.viewport.w / 1400, 0.4, 1.5); }          // sprite sizes; stars sized for the eye buffer, not the page's pixel ratio
 };
-// ---- the interface in VR: three floating panels around the simulation, worked with a laser pointer from either hand ----
-// Point at it and pull the trigger to press a button or drag the timeline; hold the grip while pointing at it to carry it
-// somewhere else. Off the panel the grip grabs the world (one hand drags, two hands stretch and turn).
-// Sticks: left = turn (left/right) and tilt (forward/back), right = time (left/right) and zoom (forward/back). A / X: play or pause. B / Y: recenter the three panels.
-import { XW, surfaces, TL, panelHit, makePanelPainter } from './vr-panel.js';
+// ---- the interface in VR: one low-profile lectern console below eye level (bar + collapsible story/help card + minimized pill) ----
+// Point and pull the trigger (or pinch) to press buttons or scrub time; drag the bottom handle (or grip the console) to reposition it.
+// Outside the console, grip/pinch grabs the world (one hand moves, two hands scale and turn).
+// Sticks: left = orbit/spin (Earth stays centered in globe view; horizon stays level near ground), right = time / zoom. A/X = play/pause, B/Y = recenter console.
+import { surfaces, TL, panelHit, makePanelPainter } from './vr-panel.js';
 const xrUi = o => Object.assign(o, { transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false });
+const xrDock = new THREE.Group(); rig.add(xrDock);
 const xrPanels = Object.entries(surfaces).map(([name, spec]) => {
   const canvas = document.createElement('canvas');
-  canvas.width = XW * 1.5; canvas.height = spec.height * 1.5;
+  canvas.width = spec.lw * 1.5; canvas.height = spec.lh * 1.5;
   const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 4;
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(spec.width, spec.width * spec.height / XW), new THREE.MeshBasicMaterial(xrUi({map})));
-  mesh.renderOrder = 1000; mesh.frustumCulled = false; rig.add(mesh);
-  return {name, spec, mesh, canvas, key: null};
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(spec.width, spec.width * spec.lh / spec.lw), new THREE.MeshBasicMaterial(xrUi({ map })));
+  mesh.position.set(...spec.pos); mesh.rotation.x = spec.tilt; mesh.updateMatrix();
+  mesh.renderOrder = 1000; mesh.frustumCulled = false; xrDock.add(mesh);
+  return { name, spec, mesh, canvas, key: null };
 });
+let xrDrawer = 'story', xrMin = false;
+function xrSyncVis() {
+  for (const p of xrPanels) {
+    p.mesh.visible = p.name === 'pill' ? xrMin : p.name === 'bar' ? !xrMin : (!xrMin && xrDrawer !== 'none');
+  }
+}
+xrSyncVis();
 const xrCtl = [0, 1].map(i => {
   const c = renderer.xr.getController(i); rig.add(c);
-  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0012, 0.0012, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.45 })));
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.005, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.7 })));
+  const ray = new THREE.Mesh(new THREE.CylinderGeometry(0.0011, 0.0011, 1, 6).rotateX(-Math.PI / 2).translate(0, 0, -0.5), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.14 })));
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.0045, 12, 8), new THREE.MeshBasicMaterial(xrUi({ color: 0xffffff, opacity: 0.35 })));
   const cur = new THREE.Mesh(new THREE.RingGeometry(0.0024, 0.0040, 24), new THREE.MeshBasicMaterial(xrUi({ color: 0xffdda6 })));
   ray.renderOrder = tip.renderOrder = 1002; cur.renderOrder = 1001; cur.visible = false; ray.frustumCulled = tip.frustumCulled = cur.frustumCulled = false;
   c.add(ray, tip); rig.add(cur);
-  const d = c.userData; Object.assign(d, { ray, cur, prev: new THREE.Vector3(), grab: false, hold: false, sel: false, hit: null, drag: null });
+  const d = c.userData; Object.assign(d, { ray, tip, cur, prev: new THREE.Vector3(), grab: false, hold: null, sel: false, hit: null, drag: null });
   const pinchStart = new THREE.Vector3();
   let pinchTime = 0, lastTap = -Infinity;
+  function dropDock() {
+    rig.attach(xrDock);
+    const dx = _hp.x - xrDock.position.x, dz = _hp.z - xrDock.position.z;
+    if (dx * dx + dz * dz > 1e-4) xrDock.rotation.set(0, Math.atan2(dx, dz), 0, 'YXZ');
+    xrDock.updateMatrix();
+  }
   function release() {
     d.grab = d.sel = false; d.drag = null;
-    if (d.hold) { rig.attach(d.hold); d.hold = null; }
+    if (d.hold) { dropDock(); d.hold = null; }
   }
   function grab() { d.grab = true; d.prev.copy(c.position); }
-  function carry() { d.hold = d.hit.panel.mesh; c.attach(d.hold); }
+  function carry() { if (xrDock.parent !== rig) return; d.hold = xrDock; c.attach(xrDock); }
   c.addEventListener('connected', e => { d.src = e.data; lastTap = -Infinity; });
   c.addEventListener('disconnected', () => { release(); d.hit = d.src = null; d.cur.visible = false; });
   c.addEventListener('squeezestart', () => {
     if (d.src?.hand) return;
-    if (d.hit && d.hit.panel.mesh.parent === rig) carry(); else grab();
+    if (d.hit && xrDock.parent === rig) carry(); else grab();
   });
   c.addEventListener('squeezeend', () => {
     if (d.src?.hand) return;
-    d.grab = false; if (d.hold) { rig.attach(d.hold); d.hold = null; }
+    d.grab = false; if (d.hold && d.drag !== 'grab') { dropDock(); d.hold = null; }
   });
   // Quest sends a native select gesture for an index pinch on tracked hands.
   c.addEventListener('selectstart', () => {
@@ -3870,7 +3893,7 @@ const xrCtl = [0, 1].map(i => {
       if (!c.visible) return;
       xrPoint(c);
       if (!d.hit) { grab(); pinchTime = performance.now(); pinchStart.copy(c.position); }
-      else if (d.hit.id === 'panel' && d.hit.panel.mesh.parent === rig) carry();
+      else if ((d.hit.id === 'panel' || d.hit.id === 'grab') && xrDock.parent === rig) carry();
     }
     d.sel = true;
     if (d.hit) xrPress(c, d.hit);
@@ -3882,16 +3905,26 @@ const xrCtl = [0, 1].map(i => {
       release();
       if (tap && now - lastTap < 420) { xrSummon(); lastTap = -Infinity; }
       else lastTap = tap ? now : -Infinity;
-    } else { d.sel = false; d.drag = null; }
+    } else {
+      d.sel = false;
+      if (d.hold && d.drag === 'grab') { dropDock(); d.hold = null; }
+      d.drag = null;
+    }
   });
   d.trackingLost = () => { release(); lastTap = -Infinity; };
   return c;
 });
 const buzz = (c, a = 0.5, ms = 14) => { try { c.userData.src?.gamepad?.hapticActuators?.[0]?.pulse?.(a, ms); } catch (_) {} };
-const _hp = new THREE.Vector3(), _hq = new THREE.Quaternion(), _xcam = new THREE.PerspectiveCamera();
+const _hp = new THREE.Vector3(), _hq = new THREE.Quaternion(), _xhy = new THREE.Quaternion(), _xcam = new THREE.PerspectiveCamera();
 let xrGo = null;          // a glide to a new view, in progress
-function xrSeat(pos, quat, dist) {          // glide the rig to where the head sees what a camera at pos / quat would, with the place looked at dist away shown at 1 m
-  const s1 = clamp(dist, 50, 4e7), q1 = new THREE.Quaternion().copy(quat).multiply(_xq.copy(_hq).invert());
+function xrSeat(pos, quat, dist) {
+  // Align only horizontal head yaw (level horizon) so pressing a preset while looking down at the console centers the target straight ahead at eye level.
+  const s1 = clamp(dist, 50, 4e7);
+  const hf = _xu.set(0, 0, -1).applyQuaternion(_hq); hf.y = 0;
+  if (hf.lengthSq() < 1e-4) hf.set(0, 0, -1);
+  hf.normalize();
+  _xhy.setFromAxisAngle(_Y, Math.atan2(-hf.x, -hf.z)).invert();
+  const q1 = new THREE.Quaternion().copy(quat).multiply(_xhy);
   xrGo = { p0: rig.position.clone(), q0: rig.quaternion.clone(), s0: rig.scale.x, p1: pos.clone().sub(_xu.copy(_hp).multiplyScalar(s1).applyQuaternion(q1)), q1, s1, t: 0 };
 }
 function xrGlide(dt) {                       // 0.8 s, eased; the scale moves by ratio and the position follows it, so the approach looks even
@@ -3902,61 +3935,88 @@ function xrGlide(dt) {                       // 0.8 s, eased; the scale moves by
 }
 function xrView(h, tilt) {                   // look at the crater from h metres, tilt degrees off the vertical, from the south, north up
   const a = tilt * Math.PI / 180; _xcam.position.set(0, h * Math.cos(a), h * Math.sin(a)); _xcam.up.set(0, 0, -1); _xcam.lookAt(0, 0, 0);
+  _xcam.rotateX(-0.055);                     // lift target slightly above horizontal so it floats cleanly above the low console
   xrSeat(_xcam.position, _xcam.quaternion, h);
 }
+function xrGoPreset(id) {
+  if (id === 'earth') {
+    const dist = RE_M * 3.1;
+    _xcam.position.copy(EC).add(toV(-78, 22).applyMatrix4(GM_ROT).multiplyScalar(dist));
+    _xcam.up.copy(toV(0, 90).applyMatrix4(GM_ROT));
+    _xcam.lookAt(EC);
+    _xcam.rotateX(-0.105);                   // center whole Earth comfortably clear above the low console
+    xrSeat(_xcam.position, _xcam.quaternion, dist);
+  } else if (id in xrPresets) xrView(...xrPresets[id]);
+}
 function xrSummon() {
-  for (const {mesh,spec} of xrPanels) {
-    if (mesh.parent !== rig) continue;
-    const f = _xu.set(0,0,-1).applyQuaternion(_hq); f.y = 0;
-    if (f.lengthSq() < 1e-4) f.set(0,0,-1);
-    f.normalize().applyAxisAngle(_Y,-deg(spec.yaw));
-    const reach = 0.86;
-    mesh.position.copy(_hp).addScaledVector(f,reach); mesh.position.y += spec.lift;
-    mesh.rotation.set(Math.atan2(spec.lift,reach),Math.atan2(-f.x,-f.z),0,'YXZ');
-  }
+  if (xrDock.parent !== rig) rig.add(xrDock);
+  if (xrMin) { xrMin = false; xrSyncVis(); }
+  const f = _xu.set(0, 0, -1).applyQuaternion(_hq); f.y = 0;
+  if (f.lengthSq() < 1e-4) f.set(0, 0, -1);
+  f.normalize();
+  const reach = 0.78, drop = -0.37;
+  xrDock.position.copy(_hp).addScaledVector(f, reach); xrDock.position.y += drop;
+  xrDock.rotation.set(0, Math.atan2(-f.x, -f.z), 0, 'YXZ');
+  xrDock.updateMatrix();
+  xrAwake = 4;
 }
 function xrPress(c, hit) {
   const id = hit.id; if (id === 'panel') return;
-  buzz(c, 0.45, 18);
+  buzz(c, 0.45, 16);
+  if (id === 'grab') {
+    if (xrDock.parent === rig) { c.userData.hold = xrDock; c.userData.drag = 'grab'; c.attach(xrDock); }
+    return;
+  }
   if (id === 'time') {
     if (guide) stopGuide();
     tour = goAnim = null; setPlaying(false); setP(hit.p); c.userData.drag = 'time'; return;
   }
-  if (id === 'prev') chapter(-1); else if (id === 'next') chapter(1); else if (id === 'play') togglePlay();
-  else if (id in xrPresets) { xrPreset = id; xrView(...xrPresets[id]); }
-  else if (id === 'en' || id === 'hu') { xrLang = id; pref('panelLanguage', id); }
-  else if (id === 'help') xrHelp = !xrHelp;
+  if (id === 'prev') chapter(-1);
+  else if (id === 'next') chapter(1);
+  else if (id === 'play') togglePlay();
+  else if (id === 'crater' || id === 'gulf' || id === 'earth') { xrPreset = id; xrGoPreset(id); }
+  else if (id === 'cut') setCut(cutMode === 'off' ? 'ns' : 'off');
+  else if (id === 'story') { xrDrawer = xrDrawer === 'story' ? 'none' : 'story'; xrSyncVis(); }
+  else if (id === 'help') { xrDrawer = xrDrawer === 'help' ? 'none' : 'help'; xrSyncVis(); }
+  else if (id === 'close') { xrDrawer = 'none'; xrSyncVis(); }
+  else if (id === 'lang') { xrLang = xrLang === 'en' ? 'hu' : 'en'; pref('panelLanguage', xrLang); }
+  else if (id === 'min') { xrMin = true; xrSyncVis(); }
+  else if (id === 'expand') { xrMin = false; xrSyncVis(); xrAwake = 3; }
   else if (id === 'exit') renderer.xr.getSession()?.end();
 }
 const _ro = new THREE.Vector3(), _rd = new THREE.Vector3(), _rm = new THREE.Matrix4();
-function xrPoint(c) {                        // where this hand's ray meets the panel: sets the cursor, the ray's length and what is under it
-  const d = c.userData, previous = d.hit?.id; d.hit = null; d.cur.visible = false; d.ray.scale.z = 0.35;
-  if (!d.src || (d.src.hand && !c.visible) || d.hold || d.grab) return;
+function xrPoint(c) {                        // where this hand's ray meets the console: sets cursor, ray length/opacity, and target id
+  const d = c.userData, previous = d.hit?.id; d.hit = null; d.cur.visible = false;
+  d.ray.scale.z = 0.12; d.ray.material.opacity = 0.14; d.tip.material.opacity = 0.35;
+  if (!d.src || (d.src.hand && !c.visible) || d.hold || d.grab || xrDock.parent !== rig) return;
+  xrDock.updateMatrix();
   let nearest = 3;
   for (const panel of xrPanels) {
-    const {mesh,name,spec} = panel;
-    if (mesh.parent !== rig || (d.drag && name !== 'timeline')) continue;
-    mesh.updateMatrix(); _rm.copy(mesh.matrix).invert();
-    _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0,0,-1).applyQuaternion(c.quaternion).transformDirection(_rm);
+    const { mesh, name, spec } = panel;
+    if (!mesh.visible || (d.drag === 'time' && name !== 'bar')) continue;
+    _rm.multiplyMatrices(xrDock.matrix, mesh.matrix).invert();
+    _ro.copy(c.position).applyMatrix4(_rm); _rd.set(0, 0, -1).applyQuaternion(c.quaternion).transformDirection(_rm);
     if (_ro.z <= 0 || _rd.z >= -1e-4) continue;
-    const t = -_ro.z/_rd.z, x = _ro.x+t*_rd.x, y = _ro.y+t*_rd.y;
-    const px = XW*(0.5+x/spec.width), py = spec.height/2-y*XW/spec.width;
-    const p = clamp((px-TL.x)/TL.w,0,1);
+    const t = -_ro.z / _rd.z, x = _ro.x + t * _rd.x, y = _ro.y + t * _rd.y;
+    const px = spec.lw * (0.5 + x / spec.width), py = spec.lh * 0.5 - y * spec.lw / spec.width;
+    const p = clamp((px - TL.x) / TL.w, 0, 1);
     if (d.drag === 'time') setP(p);
-    if (t > nearest || px < 0 || px > XW || py < 0 || py > spec.height) continue;
+    if (t > nearest || px < 0 || px > spec.lw || py < 0 || py > spec.lh) continue;
+    const id = d.drag || panelHit(name, px, py);
+    if (!id) continue;
     nearest = t;
-    const id = d.drag || panelHit(name,px,py);
-    d.hit = {id,p,panel}; d.ray.scale.z = t;
+    d.hit = { id, p, panel };
+    d.ray.scale.z = t; d.ray.material.opacity = 0.55; d.tip.material.opacity = 0.85;
     if (d.cur.parent !== mesh) mesh.add(d.cur);
-    d.cur.visible = true; d.cur.position.set(x,y,0.001);
+    d.cur.visible = true; d.cur.position.set(x, y, 0.001);
   }
   if (!d.hit) return;
   const id = d.hit.id;
   d.cur.scale.setScalar(d.sel ? 0.75 : 1);
   if (id !== previous && id !== 'panel' && !d.drag) buzz(c, 0.12, 8);
 }
-let xrDrawT = 0, xrHelp = false, xrPerf = '', xrPerfT = 0;
-const xrPresets = { crater: [3e5, 46], gulf: [1.8e6, 26], earth: [6.5e6, 26] };
+let xrDrawT = 0, xrPerf = '', xrPerfT = 0;
+const xrPresets = { crater: [3.2e5, 48], gulf: [1.7e6, 28], earth: [RE_M * 3.0, 0] };
 let xrPreset = '', xrLang = ['hu', 'en'].includes(pref('panelLanguage')) ? pref('panelLanguage') : LANG;
 const xrTranslations = { hu: translator(hungarian), en: translator(null) };
 const panelTr = (s, values) => xrTranslations[xrLang](s, values);
@@ -3964,27 +4024,30 @@ for (const panel of xrPanels) panel.paint = makePanelPainter(panel.name, panel.c
   [[0, '−3 h'], [pOfT(0), 'impact'], [pOfT(600), '10 min'], [pOfT(86400), '1 d'], [1, '100 kyr']]);
 function xrDraw(dt) {
   if ((xrDrawT -= dt) > 0) return; xrDrawT = 0.1;
-  if (xrHelp && (xrPerfT -= 0.1) <= 0) {
+  if (xrDrawer === 'help' && !xrMin && (xrPerfT -= 0.1) <= 0) {
     xrPerfT = 1; xrPerf = Math.round(1 / xrDt) + ' fps';
   }
   const hover = xrCtl.map(c => c.userData.hit?.id);
   const pressed = xrCtl.map(c => c.userData.sel ? c.userData.drag || c.userData.hit?.id : null);
   const clock = impactClock(panelTr, xrLang), active = guide ? !guide.paused : playing;
   const hands = xrCtl.some(c => c.userData.src?.hand);
+  const cutOn = cutMode !== 'off';
   const [title, story] = STAGES[S.phase];
   for (const panel of xrPanels) {
-    const local = xrCtl.map((c,i) => c.userData.hit?.panel === panel ? [hover[i],pressed[i]].join('/') : '');
-    const content = panel.name === 'timeline' ? [clock,Math.round(P*TL.w)] :
-      panel.name === 'guide' ? [hands,S.phase,xrHelp,xrHelp && xrPerf] : [hands,xrPreset,active];
-    const key = [xrLang,...content,...local].join('|');
+    if (!panel.mesh.visible) continue;
+    const local = xrCtl.map((c, i) => c.userData.hit?.panel === panel ? [hover[i], pressed[i]].join('/') : '');
+    const content = panel.name === 'bar' ? [S.phase, clock, Math.round(P * TL.w), xrPreset, cutOn, active, xrDrawer] :
+      panel.name === 'card' ? [hands, S.phase, xrDrawer, xrDrawer === 'help' && xrPerf] :
+      [clock, active];
+    const key = [xrLang, ...content, ...local].join('|');
     if (key === panel.key) continue;
     panel.key = key;
-    panel.paint({hands, lang:xrLang, preset:xrPreset, title:panelTr(title), story:panelTr(story), clock, p:P, playing:active, help:xrHelp, perf:xrPerf, hover, pressed});
+    panel.paint({ hands, lang: xrLang, preset: xrPreset, cut: cutOn, title: panelTr(title), story: panelTr(story), clock, p: P, playing: active, drawer: xrDrawer, perf: xrPerf, hover, pressed });
     panel.mesh.material.map.needsUpdate = true;
   }
 }
-const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xr = new THREE.Quaternion();
-let xrStickAxis = '', xrBtn = 0, xrPlace = true, xrAwake = 6;
+const _xa = new THREE.Vector3(), _xb = new THREE.Vector3(), _xw = new THREE.Vector3(), _xp = new THREE.Vector3(), _xr = new THREE.Quaternion();
+let xrStickAxis = '', xrBtn = 0, xrPlace = true, xrAwake = 4.5;
 // Mesh detail in VR. The terrain meshes are flat grids that the vertex shaders shape from textures, drawn whole and once
 // per eye: at full density that was 7.4 million triangles a frame. Each one is swapped for a coarser grid while it is
 // small in view (about one cell per 2 mm at arm's length is as fine as the headset shows). Surf/sea and gulfMesh/gulfSea
@@ -4027,7 +4090,7 @@ function xrLod(restore, focus) {
     if (!restore) { const want = l.earth && s < 2e6 ? 256 : l.size / s / 0.002; n = [32, 64, 128, 192, 256].find(k => k >= want && k < l.max) || l.max; }          // near the ground only the globe's horizon shows
     if (!restore && (l.mesh === gulfMesh || l.mesh === gulfSea)) n = Math.min(n, (craterClose || gulfOverview || GU.uOrbit.value) ? 128 : 192);
     if (!restore && l.earth && n > 256) {
-      // Use a 256x128 sphere in the Whole Earth preset (alt ~ 0.97 RE) and orbital views; hysteresis avoids flicker when leaning.
+      // Use a 256x128 sphere in the Whole Earth preset (alt ~ 2 RE) and orbital views; hysteresis avoids flicker when leaning.
       const switchAltitude = l.mesh.geometry.parameters.widthSegments === 256 ? 0.65 * RE_M : 0.75 * RE_M;
       if (alt >= switchAltitude) n = 256;
     }
@@ -4067,12 +4130,14 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     if (c.userData.src?.hand && !c.visible && c.userData.sel) c.userData.trackingLost();
     xrPoint(c);
   }
-  // the panel steps back while no one points at it (after a few seconds at the start), so it does not compete with the Earth
+  // the console dims gently while you aren't pointing at it so the scene stays the focus
   xrAwake = Math.max(0, xrAwake - dt);
+  const dockHot = xrAwake > 0 || xrDock.parent !== rig || xrCtl.some(c => c.userData.hit);
   for (const panel of xrPanels) {
-    const near = xrAwake > 0 || panel.mesh.parent !== rig || xrCtl.some(c => c.userData.hit?.panel === panel);
+    if (!panel.mesh.visible) continue;
     const mat = panel.mesh.material;
-    mat.opacity += ((near ? 1 : 0.88) - mat.opacity) * Math.min(1,dt*7);
+    const targetOp = dockHot ? 0.98 : (panel.name === 'pill' ? 0.55 : 0.72);
+    mat.opacity += (targetOp - mat.opacity) * Math.min(1, dt * 7);
   }
   if (xrGo) { if (xrCtl.some(c => c.userData.grab)) xrGo = null; else { xrGlide(dt); rig.updateMatrixWorld(true); } }
   // grab: keep the world point that was in the hand (or between the hands) there
@@ -4103,17 +4168,37 @@ function xrBefore(dt) {          // give the app the camera's world pose (three.
     } else { turn += x; tilt += y; }
     if (g.buttons[4]?.pressed) btn |= 2; if (g.buttons[5]?.pressed) btn |= 4;
   }
-  const T = _xw.set(0, 0, -1).applyMatrix4(camera.matrixWorld);          // the point 1 m in front of the head: what you are looking at
+  // Smart world pivot: Earth's center in globe view (keeps the planet dead-center when spinning/zooming),
+  // transitioning smoothly to the surface point in front of you when zoomed into the Gulf or Crater.
+  const altNow = altitude();
+  const viewFwd = _xa.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  const oc = _xb.copy(camera.position).sub(EC);
+  const bRay = oc.dot(viewFwd), cRay = oc.lengthSq() - RE_M * RE_M, disc = bRay * bRay - cRay;
+  const surfP = _xw;
+  if (disc >= 0) {
+    const tHit = -bRay - Math.sqrt(disc);
+    if (tHit > 0 && tHit < 3 * RE_M) surfP.copy(camera.position).addScaledVector(viewFwd, tHit);
+    else surfP.copy(oc).normalize().multiplyScalar(RE_M).add(EC);
+  } else if (altNow > 2.5e6) {
+    surfP.copy(oc).normalize().multiplyScalar(RE_M).add(EC);
+  } else {
+    surfP.copy(camera.position).addScaledVector(viewFwd, rig.scale.x);
+  }
+  const gBlend = smooth(1.5e6, 4.5e6, altNow);
+  const pivot = _xp.copy(surfP).lerp(EC, gBlend);
   if (zoom || turn || tilt) {
     xrPreset = '';
     xrGo = null;
     const f = clamp(Math.exp(zoom * dt * 1.5), 50 / rig.scale.x, 4e7 / rig.scale.x);
-    _xq.setFromAxisAngle(_xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize(), -turn * dt * 1.2);
-    _xq.multiply(_xr.setFromAxisAngle(_xu.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize(), -tilt * dt * 1.2));          // and about the head's left-right axis: stick forward rolls the top away
-    rig.position.sub(T).multiplyScalar(f).applyQuaternion(_xq).add(T); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
+    // Near the ground, turn around the local surface vertical so the horizon stays level; in space, turn around rig up.
+    if (gBlend < 0.5) _xu.copy(surfP).sub(EC).normalize();
+    else _xu.set(0, 1, 0).applyQuaternion(rig.quaternion).normalize();
+    _xq.setFromAxisAngle(_xu, -turn * dt * 1.2);
+    _xq.multiply(_xr.setFromAxisAngle(_xu.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize(), -tilt * dt * 1.2));
+    rig.position.sub(pivot).multiplyScalar(f).applyQuaternion(_xq).add(pivot); rig.quaternion.premultiply(_xq).normalize(); rig.scale.multiplyScalar(f);
   }
-  xrLod(false, T);
-  controls.target.copy(T);          // the app's own measures of distance (fog, near plane) follow the view, and the desktop view resumes from here
+  xrLod(false, surfP);
+  controls.target.copy(pivot);          // the app's own measures of distance (fog, near plane) follow the view, and the desktop view resumes from here
   if (time) {
     if (guide) stopGuide();
     tour = goAnim = null;
@@ -4194,5 +4279,5 @@ apply(P); updateModeHint();
 renderer.setAnimationLoop(frame);
 S0.set(0, 0, -60e3); enterGlobe(true).catch(() => $('loading').classList.add('done'));      // open on the globe; the loading screen stays up until it is ready
 setTimeout(() => { loadSky().then(() => loadTopo()).then(() => loadSWE()).then(() => loadCoast()).then(() => ensureFrames()).then(() => ensureClimate()).catch(() => {}); }, 1500);   // stream the rest after the first view      // the globe data also drive the sky glow, haze and frost in this view
-if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact, xr: { view: xrView, rig, lods: xrLods } };
+if (location.search.includes('debug')) window.__dbg = { GUIDE, guide: () => guide, startGuide, stopGuide, P: () => P, scene, gulfSea, gulfMesh, setScen, clAt, ensureClimate, probeAt, frontsNow, blastR, overP, Meff, enterGlobe, leaveGlobe, gcam: camera, EC, S0, farK, altitude, bendV, unbendV, llOfWorld, worldOfLL, globeMode: () => globeMode, tour: () => tour, NORTH, jump: v => { VIEWS[v](); if (fly) fly.t = 0.999; }, S: () => S, apply: p => { setPlaying(false); setP(p); apply(p); }, setP: p => { setPlaying(false); setP(p); }, VIEWS, camera, controls, U, setCut, columnAt, seafloor, surfaceAt, renderer, frame, impact, xr: { view: xrView, preset: xrGoPreset, rig, dock: xrDock, panels: xrPanels, lods: xrLods, setDrawer: d => { xrDrawer = d; xrSyncVis(); }, setMin: m => { xrMin = m; xrSyncVis(); } } };
 </script>
